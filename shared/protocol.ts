@@ -1068,6 +1068,14 @@ export interface InteractivePrompt {
   /** the answers a review asks to submit (Claude, omp), each question with what was picked for it,
    * read whole where the terminal wrapped them. A question cut off above the pane's top is null */
   answers?: InteractivePromptAnswer[];
+  /** whether the prompt can step back to a previous question in a multi-step form */
+  can_step_back?: boolean;
+  /** previously selected option index for a single-select step, if any */
+  default_option_index?: number | null;
+  /** previously selected option indices for a multi-select step, if any */
+  default_option_indices?: number[];
+  /** previously entered custom text for a step, if any */
+  default_custom_text?: string;
   /** the last-resort card for a blocked pane no reader knows: answered with its own buttons only,
    * so a message typed in the chat still goes to the agent as typed */
   fallback?: true;
@@ -1093,13 +1101,15 @@ export interface InteractivePromptOption {
   description: string | null;
 }
 
-/** POST /api/pane/prompt/answer body. Exactly one of option_index / option_indices / custom_text. */
+/** POST /api/pane/prompt/answer body. Exactly one of option_index / option_indices / custom_text / step_back / step_index. */
 export interface PromptAnswer {
   pane_id: string;
   prompt_id: string;
   option_index?: number;
   option_indices?: number[];
   custom_text?: string;
+  step_back?: boolean;
+  step_index?: number;
 }
 
 /**

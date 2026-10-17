@@ -355,4 +355,264 @@ describe("opencode prompt contract", () => {
     expect(receivedReplies.length).toBe(1);
     expect(receivedReplies[0]!.answer).toEqual({ comments: "Everything looks great!" });
   });
+
+  it("allows stepping back to previous questions in a multi-step form and revising answers", async () => {
+    const SESSION_STEP_BACK = "ses_opencodeStepBack01";
+    receivedReplies = [];
+    pendingForms[SESSION_STEP_BACK] = [
+      {
+        id: "form_stepback_1",
+        sessionID: SESSION_STEP_BACK,
+        title: "Multi-Step Wizard",
+        metadata: { kind: "question" },
+        fields: [
+          {
+            key: "framework",
+            type: "string",
+            title: "Framework",
+            description: "Which frontend framework?",
+            options: [
+              { value: "react", label: "React" },
+              { value: "vue", label: "Vue" },
+            ],
+            custom: false,
+          },
+          {
+            key: "styling",
+            type: "string",
+            title: "Styling",
+            description: "Which styling library?",
+            options: [
+              { value: "tailwind", label: "Tailwind" },
+              { value: "vanilla", label: "Vanilla CSS" },
+            ],
+            custom: false,
+          },
+          {
+            key: "notes",
+            type: "string",
+            title: "Notes",
+            description: "Any extra notes?",
+            options: [],
+            custom: true,
+          },
+        ],
+      },
+    ];
+
+    const paneId = await setupOpencodePane(SESSION_STEP_BACK, "stepback");
+
+    // 1. Fetch step 0 (framework)
+    let prompt0: InteractivePrompt | null = null;
+    for (let i = 0; i < 50; i++) {
+      const res = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
+      const body = (await res.json()) as { prompt: InteractivePrompt | null };
+      if (body.prompt && body.prompt.question === "Which frontend framework?") {
+        prompt0 = body.prompt;
+        break;
+      }
+      await Bun.sleep(50);
+    }
+    expect(prompt0).not.toBeNull();
+    expect(prompt0!.can_step_back).toBeFalsy();
+    expect(prompt0!.steps?.[0]?.current).toBe(true);
+
+    // Answer step 0 with "React" (index 0)
+    const ans0 = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt/answer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pane_id: paneId,
+        prompt_id: prompt0!.id,
+        option_index: 0,
+      }),
+    });
+    expect(ans0.status).toBe(200);
+
+    // 2. Fetch step 1 (styling)
+    let prompt1: InteractivePrompt | null = null;
+    for (let i = 0; i < 50; i++) {
+      const res = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
+      const body = (await res.json()) as { prompt: InteractivePrompt | null };
+      if (body.prompt && body.prompt.question === "Which styling library?") {
+        prompt1 = body.prompt;
+        break;
+      }
+      await Bun.sleep(50);
+    }
+    expect(prompt1).not.toBeNull();
+    expect(prompt1!.can_step_back).toBe(true);
+    expect(prompt1!.steps?.[0]?.answered).toBe(true);
+    expect(prompt1!.steps?.[1]?.current).toBe(true);
+
+    // Step back to step 0
+    const backRes = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt/answer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pane_id: paneId,
+        prompt_id: prompt1!.id,
+        step_back: true,
+      }),
+    });
+    expect(backRes.status).toBe(200);
+
+    // 3. Fetch step 0 again, verify default_option_index is preserved as React (0)
+    let prompt0Again: InteractivePrompt | null = null;
+    for (let i = 0; i < 50; i++) {
+      const res = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
+      const body = (await res.json()) as { prompt: InteractivePrompt | null };
+      if (body.prompt && body.prompt.question === "Which frontend framework?") {
+        prompt0Again = body.prompt;
+        break;
+      }
+      await Bun.sleep(50);
+    }
+    expect(prompt0Again).not.toBeNull();
+    expect(prompt0Again!.can_step_back).toBeFalsy();
+    expect(prompt0Again!.default_option_index).toBe(0);
+
+    // Revise step 0 answer to "Vue" (index 1)
+    const reviseAns = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt/answer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pane_id: paneId,
+        prompt_id: prompt0Again!.id,
+        option_index: 1,
+      }),
+    });
+    expect(reviseAns.status).toBe(200);
+
+    // 4. Fetch step 1 again and answer with "Tailwind" (0)
+    let prompt1Again: InteractivePrompt | null = null;
+    for (let i = 0; i < 50; i++) {
+      const res = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
+      const body = (await res.json()) as { prompt: InteractivePrompt | null };
+      if (body.prompt && body.prompt.question === "Which styling library?") {
+        prompt1Again = body.prompt;
+        break;
+      }
+      await Bun.sleep(50);
+    }
+    expect(prompt1Again).not.toBeNull();
+    const ans1 = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt/answer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pane_id: paneId,
+        prompt_id: prompt1Again!.id,
+        option_index: 0,
+      }),
+    });
+    expect(ans1.status).toBe(200);
+
+    // 5. Fetch step 2 (notes), test direct step_index jump back to step 0
+    let prompt2: InteractivePrompt | null = null;
+    for (let i = 0; i < 50; i++) {
+      const res = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
+      const body = (await res.json()) as { prompt: InteractivePrompt | null };
+      if (body.prompt && body.prompt.question === "Any extra notes?") {
+        prompt2 = body.prompt;
+        break;
+      }
+      await Bun.sleep(50);
+    }
+    expect(prompt2).not.toBeNull();
+    expect(prompt2!.can_step_back).toBe(true);
+
+    // Direct jump to step 0 via step_index
+    const jumpRes = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt/answer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pane_id: paneId,
+        prompt_id: prompt2!.id,
+        step_index: 0,
+      }),
+    });
+    expect(jumpRes.status).toBe(200);
+
+    // Verify we're back at step 0 with Vue (1) preserved
+    let prompt0Jumped: InteractivePrompt | null = null;
+    for (let i = 0; i < 50; i++) {
+      const res = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
+      const body = (await res.json()) as { prompt: InteractivePrompt | null };
+      if (body.prompt && body.prompt.question === "Which frontend framework?") {
+        prompt0Jumped = body.prompt;
+        break;
+      }
+      await Bun.sleep(50);
+    }
+    expect(prompt0Jumped).not.toBeNull();
+    expect(prompt0Jumped!.default_option_index).toBe(1);
+
+    // Keep Vue (index 1), answer and advance through styling to notes
+    await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt/answer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pane_id: paneId,
+        prompt_id: prompt0Jumped!.id,
+        option_index: 1,
+      }),
+    });
+
+    let prompt1Adv: InteractivePrompt | null = null;
+    for (let i = 0; i < 50; i++) {
+      const res = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
+      const body = (await res.json()) as { prompt: InteractivePrompt | null };
+      if (body.prompt && body.prompt.question === "Which styling library?") {
+        prompt1Adv = body.prompt;
+        break;
+      }
+      await Bun.sleep(50);
+    }
+    expect(prompt1Adv).not.toBeNull();
+    expect(prompt1Adv!.default_option_index).toBe(0); // Tailwind was previously chosen
+
+    await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt/answer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pane_id: paneId,
+        prompt_id: prompt1Adv!.id,
+        option_index: 0,
+      }),
+    });
+
+    // Finally at notes, submit custom_text
+    let prompt2Final: InteractivePrompt | null = null;
+    for (let i = 0; i < 50; i++) {
+      const res = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
+      const body = (await res.json()) as { prompt: InteractivePrompt | null };
+      if (body.prompt && body.prompt.question === "Any extra notes?") {
+        prompt2Final = body.prompt;
+        break;
+      }
+      await Bun.sleep(50);
+    }
+    expect(prompt2Final).not.toBeNull();
+
+    const finalAns = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt/answer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pane_id: paneId,
+        prompt_id: prompt2Final!.id,
+        custom_text: "All set!",
+      }),
+    });
+    expect(finalAns.status).toBe(200);
+
+    // Consolidated payload submitted to OpenCode
+    expect(receivedReplies.length).toBe(1);
+    expect(receivedReplies[0]!.sessionID).toBe(SESSION_STEP_BACK);
+    expect(receivedReplies[0]!.formID).toBe("form_stepback_1");
+    expect(receivedReplies[0]!.answer).toEqual({
+      framework: "vue",
+      styling: "tailwind",
+      notes: "All set!",
+    });
+  });
 });

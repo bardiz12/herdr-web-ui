@@ -471,6 +471,10 @@ function publicPrompt(parsed: ParsedPrompt): InteractivePrompt {
     ...(parsed.queued ? { queued: parsed.queued } : {}),
     ...(parsed.steps ? { steps: parsed.steps } : {}),
     ...(parsed.answers ? { answers: parsed.answers } : {}),
+    ...(parsed.can_step_back ? { can_step_back: parsed.can_step_back } : {}),
+    ...(parsed.default_option_index !== undefined && parsed.default_option_index !== null ? { default_option_index: parsed.default_option_index } : {}),
+    ...(parsed.default_option_indices ? { default_option_indices: parsed.default_option_indices } : {}),
+    ...(parsed.default_custom_text ? { default_custom_text: parsed.default_custom_text } : {}),
     ...(parsed.fallback ? { fallback: true as const } : {}),
   };
   parsedByPublicPrompt.set(prompt, parsed);
@@ -3703,6 +3707,26 @@ async function readKnownPrompt(
         }))
       : undefined;
 
+    let defaultOptionIndex: number | null = null;
+    let defaultOptionIndices: number[] | undefined;
+    let defaultCustomText: string | undefined;
+
+    const savedAnswer = draft?.answers[field.key];
+    if (savedAnswer !== undefined) {
+      if (Array.isArray(savedAnswer)) {
+        defaultOptionIndices = savedAnswer
+          .map((val) => rawOptions.findIndex((opt) => opt.value === val))
+          .filter((idx) => idx >= 0);
+      } else if (typeof savedAnswer === "string") {
+        const optIdx = rawOptions.findIndex((opt) => opt.value === savedAnswer);
+        if (optIdx >= 0) {
+          defaultOptionIndex = optIdx;
+        } else if (customAllowed) {
+          defaultCustomText = savedAnswer;
+        }
+      }
+    }
+
     const parsed = finishPrompt(
       "opencode",
       {
@@ -3714,6 +3738,10 @@ async function readKnownPrompt(
         multi_select: multiSelect,
         custom_option_index: customOptionIndex,
         steps,
+        can_step_back: stepIndex > 0,
+        default_option_index: defaultOptionIndex,
+        default_option_indices: defaultOptionIndices,
+        default_custom_text: defaultCustomText,
       },
       {
         responder: "opencode-question",
@@ -3952,8 +3980,44 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
       const parsedPrompt = parsedByPublicPrompt.get(prompt);
       if (parsedPrompt?.responder === "opencode-question" && parsedPrompt.openCodeForm) {
         const openCodeForm = parsedPrompt.openCodeForm;
-        const supplied = [body.option_index !== undefined, body.option_indices !== undefined, body.custom_text !== undefined].filter(Boolean).length;
+        const supplied = [
+          body.option_index !== undefined,
+          body.option_indices !== undefined,
+          body.custom_text !== undefined,
+          body.step_back === true,
+          body.step_index !== undefined,
+        ].filter(Boolean).length;
         if (supplied !== 1) return badRequest("invalid_answer", "Exactly one answer is required.");
+
+        if (body.step_back === true || body.step_index !== undefined) {
+          let targetStep = openCodeForm.stepIndex - 1;
+          if (body.step_index !== undefined) {
+            if (!Number.isInteger(body.step_index) || body.step_index < 0 || body.step_index >= openCodeForm.stepIndex) {
+              return badRequest("invalid_answer", "Invalid step index to step back to.");
+            }
+            targetStep = body.step_index;
+          }
+          if (targetStep < 0) {
+            return badRequest("invalid_answer", "Cannot step back from the first step.");
+          }
+
+          let draft = openCodeFormDrafts.get(body.pane_id);
+          if (!draft || draft.formId !== openCodeForm.formId) {
+            draft = {
+              formId: openCodeForm.formId,
+              stepIndex: targetStep,
+              answers: {},
+              updatedAt: Date.now(),
+            };
+            openCodeFormDrafts.set(body.pane_id, draft);
+          } else {
+            draft.stepIndex = targetStep;
+            draft.updatedAt = Date.now();
+          }
+
+          form.answered = contentId(prompt);
+          return jsonResponse({ ok: true });
+        }
 
         let answerValue: string | string[];
         if (body.custom_text !== undefined) {
