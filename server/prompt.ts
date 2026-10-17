@@ -3660,6 +3660,7 @@ async function readKnownPrompt(
     const config = readOpenCodeService(openCodeStateDir);
     if (!config) return { prompt: null };
     const forms = await listPendingQuestionForms(config, sessionID);
+    if (!forms) return { prompt: null };
     if (forms.length === 0) {
       openCodeFormDrafts.delete(paneId);
       return { prompt: null };
@@ -4063,13 +4064,12 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
 
         const config = readOpenCodeService(options.openCodeStateDir);
         if (!config) {
-          openCodeFormDrafts.delete(body.pane_id);
           return jsonResponse({ error: { code: "service_unavailable", message: "OpenCode service is not available." } }, 502);
         }
 
         const replyResult = await replyOpenCodeForm(config, openCodeForm.sessionID, openCodeForm.formId, draft.answers);
-        openCodeFormDrafts.delete(body.pane_id);
         if (replyResult.ok) {
+          openCodeFormDrafts.delete(body.pane_id);
           formsAnswered.set(body.pane_id, Date.now());
           if (formsAnswered.size > 64) formsAnswered.delete(formsAnswered.keys().next().value!);
           askingEnded(body.pane_id);
@@ -4077,6 +4077,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
           return jsonResponse({ ok: true });
         }
         if (replyResult.status === 409) {
+          openCodeFormDrafts.delete(body.pane_id);
           return jsonResponse({ error: { code: "prompt_changed", message: "The form has already been settled." } }, 409);
         }
         return jsonResponse({ error: { code: "reply_failed", message: `Failed to reply to OpenCode form (HTTP ${replyResult.status}).` } }, 502);

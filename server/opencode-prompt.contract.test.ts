@@ -20,6 +20,7 @@ const SESSION_MULTI = "ses_opencodeQuestion02";
 
 let pendingForms: Record<string, any[]> = {};
 let receivedReplies: Array<{ sessionID: string; formID: string; answer: any; auth: string }> = [];
+let replyStatusOverride = 0;
 
 beforeAll(async () => {
   mkdirSync(join(root, "bin"), { recursive: true });
@@ -47,6 +48,11 @@ beforeAll(async () => {
       // Reply form: POST /api/session/{sessionID}/form/{formID}/reply
       const replyMatch = url.pathname.match(/^\/api\/session\/([^/]+)\/form\/([^/]+)\/reply$/);
       if (req.method === "POST" && replyMatch) {
+        if (replyStatusOverride > 0) {
+          const status = replyStatusOverride;
+          replyStatusOverride = 0;
+          return new Response("Simulated error", { status });
+        }
         const sessionID = decodeURIComponent(replyMatch[1]!);
         const formID = decodeURIComponent(replyMatch[2]!);
         const body = (await req.json()) as { answer: any };
@@ -118,11 +124,16 @@ async function setupOpencodePane(sessionID: string, label: string): Promise<stri
     state: "blocked",
   });
 
+  let blocked = false;
   for (let i = 0; i < 40; i++) {
     const pane = (await sessionSnapshot()).panes.find((p) => p.pane_id === paneId);
-    if (pane?.agent_session?.agent === "opencode" && pane?.agent_status === "blocked") break;
+    if (pane?.agent_session?.agent === "opencode" && pane?.agent_status === "blocked") {
+      blocked = true;
+      break;
+    }
     await Bun.sleep(50);
   }
+  if (!blocked) throw new Error("test opencode did not become blocked");
   return paneId;
 }
 
@@ -615,4 +626,80 @@ describe("opencode prompt contract", () => {
       notes: "All set!",
     });
   });
+
+  it("preserves form draft when reply fails with non-409 error and allows retry", async () => {
+    const SESSION_RETRY = "ses_opencodeRetry";
+    pendingForms[SESSION_RETRY] = [
+      {
+        id: "form_retry_1",
+        sessionID: SESSION_RETRY,
+        title: "Deploy Options",
+        metadata: { kind: "question" },
+        fields: [
+          {
+            key: "target",
+            type: "select",
+            description: "Deploy Target",
+            options: [
+              { label: "Staging", value: "staging" },
+              { label: "Production", value: "production" },
+            ],
+          },
+        ],
+      },
+    ];
+
+    const paneId = await setupOpencodePane(SESSION_RETRY, "retry");
+
+    let prompt: InteractivePrompt | null = null;
+    for (let i = 0; i < 50; i++) {
+      const res = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
+      const body = (await res.json()) as { prompt: InteractivePrompt | null };
+      if (body.prompt && body.prompt.question === "Deploy Target") {
+        prompt = body.prompt;
+        break;
+      }
+      await Bun.sleep(50);
+    }
+    expect(prompt).not.toBeNull();
+
+    // Simulate 500 error on first reply attempt
+    replyStatusOverride = 500;
+    const failRes = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt/answer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pane_id: paneId,
+        prompt_id: prompt!.id,
+        option_index: 0,
+      }),
+    });
+    expect(failRes.status).toBe(502);
+
+    // Prompt is still available and previous draft wasn't deleted
+    let retryPrompt: InteractivePrompt | null = null;
+    for (let i = 0; i < 50; i++) {
+      const res = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
+      const body = (await res.json()) as { prompt: InteractivePrompt | null };
+      if (body.prompt && body.prompt.question === "Deploy Target") {
+        retryPrompt = body.prompt;
+        break;
+      }
+      await Bun.sleep(50);
+    }
+    expect(retryPrompt).not.toBeNull();
+    expect(retryPrompt!.default_option_index).toBe(0);
+
+    // Retry succeeds
+    const successRes = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt/answer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pane_id: paneId,
+        prompt_id: retryPrompt!.id,
+        option_index: 0,
+      }),
+    });
+    expect(successRes.status).toBe(200);
+  }, 20_000);
 });

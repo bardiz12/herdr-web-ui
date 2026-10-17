@@ -83,13 +83,22 @@ describe("opencode-service", () => {
     const forms = await listPendingQuestionForms(config, "ses-123", mockFetch);
     expect(requestedUrl).toBe("http://127.0.0.1:54321/api/session/ses-123/form");
     expect(authHeader).toBe(`Basic ${btoa("opencode:test-pass")}`);
-    expect(forms.length).toBe(1);
-    expect(forms[0]?.id).toBe("form-1");
+    expect(forms).not.toBeNull();
+    expect(forms!.length).toBe(1);
+    expect(forms![0]?.id).toBe("form-1");
   });
 
   it("handles non-200 responses when listing forms gracefully", async () => {
     const config: OpenCodeServiceConfig = { baseUrl: "http://127.0.0.1:54321", port: 54321, pid: 9999, password: "test-pass" };
     const mockFetch = (async () => new Response("Error", { status: 500 })) as unknown as typeof fetch;
+
+    const forms = await listPendingQuestionForms(config, "ses-123", mockFetch);
+    expect(forms).toBeNull();
+  });
+
+  it("returns empty array for successful responses with no question forms", async () => {
+    const config: OpenCodeServiceConfig = { baseUrl: "http://127.0.0.1:54321", port: 54321, pid: 9999, password: "test-pass" };
+    const mockFetch = (async () => new Response(JSON.stringify([]), { status: 200, headers: { "Content-Type": "application/json" } })) as unknown as typeof fetch;
 
     const forms = await listPendingQuestionForms(config, "ses-123", mockFetch);
     expect(forms).toEqual([]);

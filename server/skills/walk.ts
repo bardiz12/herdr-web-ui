@@ -118,7 +118,8 @@ export function walkSkills(root: string, rules: WalkRules): WalkedSkill[] {
         try { ignore.add(readFileSync(join(root, filename), "utf8")); } catch { /* optional ignore file */ }
       }
     }
-    for (const entry of readdirSync(root, { withFileTypes: true })) {
+    const entries = readdirSync(root, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
+    for (const entry of entries) {
       if (entry.name.startsWith(".") || rules.skipNames?.(entry.name)) continue;
       const directory = join(root, entry.name);
       try {
@@ -139,7 +140,7 @@ export function walkSkills(root: string, rules: WalkRules): WalkedSkill[] {
         try { ignore.add(readFileSync(join(directory, filename), "utf8"), prefix ? `${prefix}/` : ""); }
         catch { continue; /* optional ignore file */ }
       }
-      const entries = readdirSync(directory, { withFileTypes: true });
+      const entries = readdirSync(directory, { withFileTypes: true }).sort((a, b) => a.name.localeCompare(b.name));
       const declared = join(directory, "SKILL.md");
       if (entries.some((entry) => entry.name === "SKILL.md") && !ignore.ignores(relative(root, declared).split(sep).join("/"))) {
         try {

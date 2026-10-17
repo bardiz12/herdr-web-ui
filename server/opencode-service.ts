@@ -78,17 +78,20 @@ export function opencodeAuthHeader(password: string): string {
   return `Basic ${btoa(`opencode:${password}`)}`;
 }
 
+export const OPENCODE_HTTP_TIMEOUT_MS = 10_000;
+
 export async function listPendingQuestionForms(
   config: OpenCodeServiceConfig,
   sessionID: string,
   fetchFn: typeof fetch = fetch,
-): Promise<OpenCodeFormInfo[]> {
+): Promise<OpenCodeFormInfo[] | null> {
   try {
     const url = `${config.baseUrl}/api/session/${encodeURIComponent(sessionID)}/form`;
     const response = await fetchFn(url, {
       headers: { Authorization: opencodeAuthHeader(config.password) },
+      signal: AbortSignal.timeout(OPENCODE_HTTP_TIMEOUT_MS),
     });
-    if (!response.ok) return [];
+    if (!response.ok) return null;
     const body = (await response.json()) as unknown;
     const items = Array.isArray(body)
       ? body
@@ -104,7 +107,7 @@ export async function listPendingQuestionForms(
       return meta?.kind === "question";
     });
   } catch {
-    return [];
+    return null;
   }
 }
 
@@ -124,6 +127,7 @@ export async function replyOpenCodeForm(
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ answer: answers }),
+      signal: AbortSignal.timeout(OPENCODE_HTTP_TIMEOUT_MS),
     });
     return { ok: response.status === 200 || response.status === 204, status: response.status };
   } catch {
@@ -146,6 +150,7 @@ export async function cancelOpenCodeForm(
       headers: {
         Authorization: opencodeAuthHeader(config.password),
       },
+      signal: AbortSignal.timeout(OPENCODE_HTTP_TIMEOUT_MS),
     });
     return { ok: response.status === 200 || response.status === 204, status: response.status };
   } catch {
