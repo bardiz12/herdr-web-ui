@@ -702,4 +702,154 @@ describe("opencode prompt contract", () => {
     });
     expect(successRes.status).toBe(200);
   }, 20_000);
+
+  it("handles multiple concurrent OpenCode instances independently without draft crosstalk", async () => {
+    const SESSION_A = "ses_opencodeMultiInstanceA";
+    const SESSION_B = "ses_opencodeMultiInstanceB";
+
+    pendingForms[SESSION_A] = [
+      {
+        id: "form_a_1",
+        sessionID: SESSION_A,
+        title: "Instance A Setup",
+        metadata: { kind: "question" },
+        fields: [
+          {
+            key: "service_name",
+            type: "string",
+            description: "Service Name",
+            options: [],
+            custom: true,
+          },
+          {
+            key: "env",
+            type: "select",
+            description: "Environment",
+            options: [
+              { label: "Staging", value: "staging" },
+              { label: "Production", value: "production" },
+            ],
+          },
+        ],
+      },
+    ];
+
+    pendingForms[SESSION_B] = [
+      {
+        id: "form_b_1",
+        sessionID: SESSION_B,
+        title: "Instance B Database",
+        metadata: { kind: "question" },
+        fields: [
+          {
+            key: "db",
+            type: "select",
+            description: "Database Engine",
+            options: [
+              { label: "PostgreSQL", value: "postgres" },
+              { label: "SQLite", value: "sqlite" },
+            ],
+          },
+        ],
+      },
+    ];
+
+    const paneIdA = await setupOpencodePane(SESSION_A, "instance-a");
+    const paneIdB = await setupOpencodePane(SESSION_B, "instance-b");
+
+    receivedReplies = [];
+
+    // 1. Fetch prompts for both instances
+    let promptA1: InteractivePrompt | null = null;
+    let promptB: InteractivePrompt | null = null;
+
+    for (let i = 0; i < 50; i++) {
+      if (!promptA1) {
+        const resA = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneIdA)}`);
+        const bodyA = (await resA.json()) as { prompt: InteractivePrompt | null };
+        if (bodyA.prompt?.question === "Service Name") promptA1 = bodyA.prompt;
+      }
+      if (!promptB) {
+        const resB = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneIdB)}`);
+        const bodyB = (await resB.json()) as { prompt: InteractivePrompt | null };
+        if (bodyB.prompt?.question === "Database Engine") promptB = bodyB.prompt;
+      }
+      if (promptA1 && promptB) break;
+      await Bun.sleep(50);
+    }
+
+    expect(promptA1).not.toBeNull();
+    expect(promptB).not.toBeNull();
+
+    // 2. Answer step 1 of Instance A with custom text "AuthService"
+    const ansA1 = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt/answer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pane_id: paneIdA,
+        prompt_id: promptA1!.id,
+        custom_text: "AuthService",
+      }),
+    });
+    expect(ansA1.status).toBe(200);
+
+    // Verify Instance B's prompt is still active and unchanged
+    const resBCheck = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneIdB)}`);
+    const bodyBCheck = (await resBCheck.json()) as { prompt: InteractivePrompt | null };
+    expect(bodyBCheck.prompt).not.toBeNull();
+    expect(bodyBCheck.prompt!.question).toBe("Database Engine");
+
+    // 3. Answer Instance B with "PostgreSQL" (index 0) -> this settles Instance B
+    const ansB = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt/answer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pane_id: paneIdB,
+        prompt_id: bodyBCheck.prompt!.id,
+        option_index: 0,
+      }),
+    });
+    expect(ansB.status).toBe(200);
+
+    // Verify Instance B reply was sent, but NOT Instance A
+    expect(receivedReplies.length).toBe(1);
+    expect(receivedReplies[0]!.sessionID).toBe(SESSION_B);
+    expect(receivedReplies[0]!.formID).toBe("form_b_1");
+    expect(receivedReplies[0]!.answer).toEqual({ db: "postgres" });
+
+    // 4. Fetch step 2 of Instance A
+    let promptA2: InteractivePrompt | null = null;
+    for (let i = 0; i < 50; i++) {
+      const resA2 = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneIdA)}`);
+      const bodyA2 = (await resA2.json()) as { prompt: InteractivePrompt | null };
+      if (bodyA2.prompt?.question === "Environment") {
+        promptA2 = bodyA2.prompt;
+        break;
+      }
+      await Bun.sleep(50);
+    }
+    expect(promptA2).not.toBeNull();
+    expect(promptA2!.can_step_back).toBe(true);
+
+    // 5. Answer step 2 of Instance A with "Production" (index 1) -> settles Instance A
+    const ansA2 = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt/answer`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        pane_id: paneIdA,
+        prompt_id: promptA2!.id,
+        option_index: 1,
+      }),
+    });
+    expect(ansA2.status).toBe(200);
+
+    // Both instances have now replied with their own respective answers
+    expect(receivedReplies.length).toBe(2);
+    expect(receivedReplies[1]!.sessionID).toBe(SESSION_A);
+    expect(receivedReplies[1]!.formID).toBe("form_a_1");
+    expect(receivedReplies[1]!.answer).toEqual({
+      service_name: "AuthService",
+      env: "production",
+    });
+  }, 25_000);
 });
