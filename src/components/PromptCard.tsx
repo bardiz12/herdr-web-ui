@@ -147,7 +147,7 @@ export function PromptCard({ paneId, prompt, onPromptChanged, onAnswered, typedA
             disabled={pending}
             aria-label={t("Back")}
             title={t("Back")}
-            onClick={(event) => void answer({ step_back: true }, event)}
+            onClick={(event) => void answer({ step_back: true, draft: { option_indices: [...selected], custom_text: custom } }, event)}
           >
             <ArrowLeft aria-hidden="true" />
             <span>{t("Back")}</span>
@@ -185,7 +185,7 @@ export function PromptCard({ paneId, prompt, onPromptChanged, onAnswered, typedA
                     disabled={pending}
                     aria-label={step.label}
                     title={t("Back")}
-                    onClick={(event) => void answer({ step_index: index }, event)}
+                    onClick={(event) => void answer({ step_index: index, draft: { option_indices: [...selected], custom_text: custom } }, event)}
                   >
                     <span className="prompt-card-step-mark" aria-hidden="true"><Check /></span>
                     <span className="prompt-card-step-label">{step.label}</span>

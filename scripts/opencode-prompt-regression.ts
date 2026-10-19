@@ -1,0 +1,93 @@
+import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { chromium } from "playwright-core";
+
+import panes from "../site/demo/fixtures/panes.json";
+import { appFaces } from "./app-faces.ts";
+import { chromePath } from "./chrome-path.ts";
+import { buildDemoApp } from "./demo-build.ts";
+
+// Only the demo transport and fictional question cards; never a user's OpenCode session.
+const app = mkdtempSync(join(tmpdir(), "opencode-prompt-browser-"));
+const shots = process.env.OPENCODE_PROMPT_SHOTS;
+const prompt = {
+  id: "native-second", agent: "opencode", kind: "question", title: "Tools",
+  question: "Which tools should the fictional project use?", body: null,
+  options: [{ label: "Formatter", description: null }, { label: "Linter", description: null }, { label: "Your answer", description: null }],
+  multi_select: true, custom_option_index: 2, can_step_back: true,
+  steps: [{ label: "Project", answered: true, current: false }, { label: "Tools", answered: false, current: true }],
+};
+
+try {
+  await buildDemoApp(app);
+  const index = join(app, "index.html");
+  const transport = `<script>(() => {
+    const demo = window.fetch;
+    window.nativePrompt = ${JSON.stringify(prompt)};
+    window.nativeAnswers = [];
+    window.fetch = async (input, init) => {
+      const url = new URL(typeof input === "string" ? input : input.url || input.href, location.href);
+      if (url.pathname === "/api/pane/prompt" && url.searchParams.get("pane_id") === ${JSON.stringify(panes.web)})
+        return Response.json({ prompt: window.nativePrompt, suggestion: null });
+      if (url.pathname === "/api/pane/prompt/answer") {
+        window.nativeAnswers.push(JSON.parse(init.body));
+        window.nativePrompt = null;
+        return Response.json({ ok: true });
+      }
+      return demo(input, init);
+    };
+  })();</script>`;
+  writeFileSync(index, readFileSync(index, "utf8").replace(/<script type="module"/, `<script src="./demo-transport.js"></script>${transport}<script type="module"`));
+  const server = Bun.serve({
+    hostname: "127.0.0.1", port: 0,
+    fetch(request) {
+      const path = new URL(request.url).pathname.replace(/^\/herdr-web-ui\/demo\/app\//, "");
+      if (path.includes("..")) return new Response(null, { status: 404 });
+      return new Response(Bun.file(join(app, path || "index.html")));
+    },
+  });
+  const browser = await chromium.launch({ executablePath: chromePath(), headless: true, args: ["--no-sandbox"] });
+  try {
+    if (shots) mkdirSync(shots, { recursive: true });
+    for (const width of [390, 1440]) for (const theme of ["light", "dark"]) for (const navigation of ["back", "chip"]) {
+      const context = await browser.newContext({
+        viewport: { width, height: 900 }, isMobile: width === 390, hasTouch: width === 390, deviceScaleFactor: width === 390 ? 3 : 1,
+      });
+      try {
+        await context.addInitScript((theme) => localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ language: "en", theme })), theme);
+        const page = await context.newPage();
+        const errors: string[] = [];
+        page.on("pageerror", (error) => errors.push(error.message));
+        await page.goto(`${server.url.origin}/herdr-web-ui/demo/app/?pane=${encodeURIComponent(panes.web)}`);
+        await page.locator(".prompt-card").waitFor();
+        await appFaces(page);
+        await page.locator('.prompt-card input[type="checkbox"]').first().check();
+        await page.locator(".prompt-card-custom input").fill("A custom tool");
+        if (shots) await page.screenshot({ path: join(shots, `${width}-${theme}-${navigation}-edited.png`) });
+        const submitted = page.waitForFunction(() => (window as unknown as { nativeAnswers: unknown[] }).nativeAnswers.length === 1);
+        await page.locator(navigation === "back" ? ".prompt-card-back" : ".prompt-card-step-button").click();
+        await submitted;
+        const answer = await page.evaluate(() => (window as unknown as { nativeAnswers: { draft?: unknown }[] }).nativeAnswers[0]);
+        assert.deepEqual(answer?.draft, { option_indices: [0], custom_text: "A custom tool" }, "navigation must carry the current edits");
+        await page.locator(".prompt-card").waitFor({ state: "hidden" });
+        // The backend's navigation round trip is covered by opencode-answer.test.ts. Remount
+        // this real component with its returned defaults to check both input controls.
+        await page.evaluate((next) => {
+          (window as unknown as { nativePrompt: unknown }).nativePrompt = { ...next, id: "native-returned", default_option_indices: [0], default_custom_text: "A custom tool" };
+        }, prompt);
+        await page.locator(".prompt-card").waitFor();
+        assert.equal(await page.locator('.prompt-card input[type="checkbox"]').first().isChecked(), true);
+        assert.equal(await page.locator(".prompt-card-custom input").inputValue(), "A custom tool");
+        assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+        assert.deepEqual(errors, []);
+        if (shots) await page.screenshot({ path: join(shots, `${width}-${theme}-${navigation}-restored.png`) });
+        console.log(`PASS ${width} ${theme} ${navigation}: drafts survive navigation and remount`);
+      } finally { await context.close(); }
+    }
+  } finally {
+    await browser.close();
+    server.stop(true);
+  }
+} finally { rmSync(app, { recursive: true, force: true }); }
