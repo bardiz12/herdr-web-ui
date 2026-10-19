@@ -1,4 +1,5 @@
 import { closeSync, constants, fstatSync, openSync, readSync } from "node:fs";
+import { request } from "node:http";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -89,23 +90,54 @@ export function opencodeAuthHeader(password: string): string {
 
 export const OPENCODE_HTTP_TIMEOUT_MS = 1_500;
 
+/** node:http does not use Bun fetch's proxy environment, including on Bun 1.4.2. */
+function openCodeRequest(config: OpenCodeServiceConfig, path: string, signal?: AbortSignal, body?: string): Promise<{ status: number; body: string } | null> {
+  return new Promise((resolve) => {
+    const req = request(new URL(path, config.baseUrl), {
+      agent: false,
+      method: body === undefined ? "GET" : "POST",
+      headers: {
+        Authorization: opencodeAuthHeader(config.password),
+        ...(body === undefined ? {} : { "Content-Type": "application/json" }),
+      },
+      signal: AbortSignal.any([AbortSignal.timeout(OPENCODE_HTTP_TIMEOUT_MS), ...(signal ? [signal] : [])]),
+    }, (response) => {
+      const status = response.statusCode ?? 0;
+      response.once("error", () => resolve(null));
+      response.once("aborted", () => resolve(null));
+      // Replies need only their acknowledgement; errors and redirects have no usable form body.
+      // Destroy rather than drain a body we will not use, so it cannot hold the request open.
+      if (body !== undefined || status < 200 || status >= 300) {
+        resolve({ status, body: "" });
+        response.destroy();
+        return;
+      }
+      const chunks: Buffer[] = [];
+      let bytes = 0;
+      response.on("data", (chunk: Buffer) => {
+        bytes += chunk.length;
+        if (bytes > 1024 * 1024) {
+          resolve(null);
+          response.destroy();
+          req.destroy();
+        } else chunks.push(chunk);
+      });
+      response.once("end", () => resolve({ status, body: Buffer.concat(chunks).toString("utf8") }));
+    });
+    req.once("error", () => resolve(null));
+    req.end(body);
+  });
+}
+
 export async function listPendingQuestionForms(
   config: OpenCodeServiceConfig,
   sessionID: string,
-  fetchFn: typeof fetch = fetch,
   signal?: AbortSignal,
 ): Promise<OpenCodeFormInfo[] | null> {
   try {
-    const url = `${config.baseUrl}/api/session/${encodeURIComponent(sessionID)}/form`;
-    const request: RequestInit & { proxy: false } = {
-      headers: { Authorization: opencodeAuthHeader(config.password) },
-      redirect: "error",
-      proxy: false,
-      signal: AbortSignal.any([AbortSignal.timeout(OPENCODE_HTTP_TIMEOUT_MS), ...(signal ? [signal] : [])]),
-    };
-    const response = await fetchFn(url, request);
-    if (!response.ok) return null;
-    const body = (await response.json()) as unknown;
+    const response = await openCodeRequest(config, `/api/session/${encodeURIComponent(sessionID)}/form`, signal);
+    if (!response || response.status < 200 || response.status >= 300) return null;
+    const body = JSON.parse(response.body) as unknown;
     const items = Array.isArray(body)
       ? body
       : (typeof body === "object" && body !== null && Array.isArray((body as Record<string, unknown>).data)
@@ -142,24 +174,12 @@ export async function replyOpenCodeForm(
   sessionID: string,
   formID: string,
   answers: Record<string, string | string[]>,
-  fetchFn: typeof fetch = fetch,
   signal?: AbortSignal,
 ): Promise<{ ok: boolean; status: number }> {
   try {
-    const url = `${config.baseUrl}/api/session/${encodeURIComponent(sessionID)}/form/${encodeURIComponent(formID)}/reply`;
-    const request: RequestInit & { proxy: false } = {
-      method: "POST",
-      headers: {
-        Authorization: opencodeAuthHeader(config.password),
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ answer: answers }),
-      redirect: "error",
-      proxy: false,
-      signal: AbortSignal.any([AbortSignal.timeout(OPENCODE_HTTP_TIMEOUT_MS), ...(signal ? [signal] : [])]),
-    };
-    const response = await fetchFn(url, request);
-    return { ok: response.status === 200 || response.status === 204, status: response.status };
+    const response = await openCodeRequest(config, `/api/session/${encodeURIComponent(sessionID)}/form/${encodeURIComponent(formID)}/reply`, signal, JSON.stringify({ answer: answers }));
+    const status = response?.status ?? 0;
+    return { ok: status === 200 || status === 204, status };
   } catch {
     return { ok: false, status: 0 };
   }

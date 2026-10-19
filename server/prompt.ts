@@ -3742,7 +3742,7 @@ async function readKnownPrompt(
     const config = readOpenCodeService(openCodeStateDir);
     const revision = state.revision;
     const issued = ++state.issued;
-    const forms = config ? await listPendingQuestionForms(config, sessionID, fetch, signal) : null;
+    const forms = config ? await listPendingQuestionForms(config, sessionID, signal) : null;
     if (signal?.aborted || openCodeState.entries.get(paneId) !== state) return { prompt: null, stale: true };
     if (state.revision === revision && issued >= state.applied) {
       state.applied = issued;
@@ -4211,7 +4211,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
         }
 
         if (!(await stillBound())) return promptChanged();
-        const replyResult = await replyOpenCodeForm(config, openCodeForm.sessionID, openCodeForm.formId, draft.answers, fetch, deadline);
+        const replyResult = await replyOpenCodeForm(config, openCodeForm.sessionID, openCodeForm.formId, draft.answers, deadline);
         if (replyResult.ok) {
           // An upstream acknowledgement is authoritative, even after a poll or status change.
           // Only clean up this asking: another form/session may already have replaced it.

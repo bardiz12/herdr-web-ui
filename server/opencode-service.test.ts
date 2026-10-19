@@ -12,6 +12,13 @@ import {
   type OpenCodeServiceConfig,
 } from "./opencode-service.ts";
 
+async function withService(handler: (request: Request) => Response | Promise<Response>, run: (config: OpenCodeServiceConfig) => Promise<void>): Promise<void> {
+  const service = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: handler });
+  try {
+    await run({ baseUrl: service.url.origin, port: service.port ?? 0, pid: process.pid, password: "test-pass" });
+  } finally { service.stop(true); }
+}
+
 describe("opencode-service", () => {
   it("sends native credentials and answers directly despite proxy environment variables", async () => {
     const direct: string[] = [];
@@ -113,7 +120,9 @@ describe("opencode-service", () => {
     const target = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => { forwarded++; return new Response(null, { status: 204 }); } });
     const service = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(null, { status: 307, headers: { location: target.url.href } }) });
     try {
-      expect((await replyOpenCodeForm({ baseUrl: service.url.origin, port: service.port ?? 0, pid: process.pid, password: "fixture" }, "session", "form", { q0: "private" })).ok).toBe(false);
+      const config = { baseUrl: service.url.origin, port: service.port ?? 0, pid: process.pid, password: "fixture" };
+      expect(await listPendingQuestionForms(config, "session")).toBeNull();
+      expect(await replyOpenCodeForm(config, "session", "form", { q0: "private" })).toEqual({ ok: false, status: 307 });
       expect(forwarded).toBe(0);
     } finally { service.stop(true); target.stop(true); }
   });
@@ -149,16 +158,13 @@ describe("opencode-service", () => {
     expect(atob(opencodeAuthHeader("secret-pass").slice(6))).toBe("opencode:secret-pass");
   });
 
-  it("lists and filters pending question forms with direct array or { data: [] } wrapper", async () => {
-    const config: OpenCodeServiceConfig = { baseUrl: "http://127.0.0.1:54321", port: 54321, pid: 9999, password: "test-pass" };
+  it.each(["array", "wrapper"])("lists and filters pending question forms in a %s", async (shape) => {
     let requestedUrl = "";
     let authHeader = "";
-
-    const mockFetch = (async (url: string | URL | Request, init?: RequestInit) => {
-      requestedUrl = String(url);
-      authHeader = String(init?.headers ? (init.headers as Record<string, string>)["Authorization"] : "");
-      return new Response(JSON.stringify({
-        data: [
+    await withService((request) => {
+      requestedUrl = new URL(request.url).pathname;
+      authHeader = request.headers.get("authorization") ?? "";
+      const forms = [
           {
             id: "form-1",
             sessionID: "ses-123",
@@ -179,54 +185,96 @@ describe("opencode-service", () => {
             title: "Unknown Form",
             fields: [],
           },
-        ],
-      }), { status: 200, headers: { "Content-Type": "application/json" } });
-    }) as unknown as typeof fetch;
-
-    const forms = await listPendingQuestionForms(config, "ses-123", mockFetch);
-    expect(requestedUrl).toBe("http://127.0.0.1:54321/api/session/ses-123/form");
-    expect(authHeader).toBe(`Basic ${btoa("opencode:test-pass")}`);
-    expect(forms).not.toBeNull();
-    expect(forms!.length).toBe(1);
-    expect(forms![0]?.id).toBe("form-1");
+      ];
+      return Response.json(shape === "array" ? forms : { data: forms });
+    }, async (config) => {
+      const forms = await listPendingQuestionForms(config, "ses-123");
+      expect(requestedUrl).toBe("/api/session/ses-123/form");
+      expect(atob(authHeader.slice(6))).toBe("opencode:test-pass");
+      expect(forms?.length).toBe(1);
+      expect(forms?.[0]?.id).toBe("form-1");
+    });
   });
 
   it("handles non-200 responses when listing forms gracefully", async () => {
-    const config: OpenCodeServiceConfig = { baseUrl: "http://127.0.0.1:54321", port: 54321, pid: 9999, password: "test-pass" };
-    const mockFetch = (async () => new Response("Error", { status: 500 })) as unknown as typeof fetch;
-
-    const forms = await listPendingQuestionForms(config, "ses-123", mockFetch);
-    expect(forms).toBeNull();
+    await withService(() => new Response("Error", { status: 500 }), async (config) => {
+      expect(await listPendingQuestionForms(config, "ses-123")).toBeNull();
+    });
   });
 
   it("returns empty array for successful responses with no question forms", async () => {
-    const config: OpenCodeServiceConfig = { baseUrl: "http://127.0.0.1:54321", port: 54321, pid: 9999, password: "test-pass" };
-    const mockFetch = (async () => new Response(JSON.stringify([]), { status: 200, headers: { "Content-Type": "application/json" } })) as unknown as typeof fetch;
-
-    const forms = await listPendingQuestionForms(config, "ses-123", mockFetch);
-    expect(forms).toEqual([]);
+    await withService(() => Response.json([]), async (config) => {
+      expect(await listPendingQuestionForms(config, "ses-123")).toEqual([]);
+    });
   });
 
   it("replies to forms with correct payload and headers", async () => {
-    const config: OpenCodeServiceConfig = { baseUrl: "http://127.0.0.1:54321", port: 54321, pid: 9999, password: "test-pass" };
     let postedBody = "";
-
-    const mockFetch = (async (_url: string | URL | Request, init?: RequestInit) => {
-      postedBody = String(init?.body);
+    let authHeader = "";
+    await withService(async (request) => {
+      postedBody = await request.text();
+      authHeader = request.headers.get("authorization") ?? "";
+      expect(new URL(request.url).pathname).toBe("/api/session/ses-123/form/form-1/reply");
       return new Response(null, { status: 204 });
-    }) as unknown as typeof fetch;
-
-    const result = await replyOpenCodeForm(config, "ses-123", "form-1", { q0: "Blue", q1: ["A", "B"] }, mockFetch);
-    expect(result).toEqual({ ok: true, status: 204 });
-    expect(JSON.parse(postedBody)).toEqual({ answer: { q0: "Blue", q1: ["A", "B"] } });
+    }, async (config) => {
+      const result = await replyOpenCodeForm(config, "ses-123", "form-1", { q0: "Blue", q1: ["A", "B"] });
+      expect(result).toEqual({ ok: true, status: 204 });
+      expect(atob(authHeader.slice(6))).toBe("opencode:test-pass");
+      expect(JSON.parse(postedBody)).toEqual({ answer: { q0: "Blue", q1: ["A", "B"] } });
+    });
   });
 
   it("handles reply errors such as 409 FormAlreadySettledError", async () => {
-    const config: OpenCodeServiceConfig = { baseUrl: "http://127.0.0.1:54321", port: 54321, pid: 9999, password: "test-pass" };
-    const mockFetch = (async () => new Response(JSON.stringify({ error: "FormAlreadySettledError" }), { status: 409 })) as unknown as typeof fetch;
+    await withService(() => Response.json({ error: "FormAlreadySettledError" }, { status: 409 }), async (config) => {
+      expect(await replyOpenCodeForm(config, "ses-123", "form-1", { q0: "Blue" })).toEqual({ ok: false, status: 409 });
+    });
+  });
 
-    const result = await replyOpenCodeForm(config, "ses-123", "form-1", { q0: "Blue" }, mockFetch);
-    expect(result).toEqual({ ok: false, status: 409 });
+  it("rejects invalid JSON and oversized form responses", async () => {
+    for (const body of ["not JSON", JSON.stringify({ data: [], padding: "x".repeat(2 * 1024 * 1024) })]) {
+      await withService(() => new Response(body), async (config) => {
+        expect(await listPendingQuestionForms(config, "ses-123")).toBeNull();
+      });
+    }
+  });
+
+  it("aborts the active native request when its caller cancels", async () => {
+    const entered = Promise.withResolvers<void>();
+    const release = Promise.withResolvers<Response>();
+    await withService(() => { entered.resolve(); return release.promise; }, async (config) => {
+      const controller = new AbortController();
+      const listing = listPendingQuestionForms(config, "ses-123", controller.signal);
+      await entered.promise;
+      controller.abort();
+      try { expect(await listing).toBeNull(); }
+      finally { release.resolve(Response.json([])); }
+    });
+  });
+
+  it("bounds a form response that sends headers but never finishes its body", async () => {
+    let close: (() => void) | undefined;
+    await withService(() => new Response(new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode("[")); close = () => controller.close(); },
+      cancel() { close = undefined; },
+    })), async (config) => {
+      const start = performance.now();
+      try {
+        expect(await listPendingQuestionForms(config, "ses-123")).toBeNull();
+        expect(performance.now() - start).toBeLessThan(2_500);
+      } finally { close?.(); }
+    });
+  }, 3_000);
+
+  it("accepts successful reply headers without waiting for an unused body", async () => {
+    let close: (() => void) | undefined;
+    await withService(() => new Response(new ReadableStream<Uint8Array>({
+      start(controller) { controller.enqueue(new TextEncoder().encode("accepted")); close = () => controller.close(); },
+      cancel() { close = undefined; },
+    })), async (config) => {
+      try {
+        expect(await replyOpenCodeForm(config, "ses-123", "form-1", { q0: "Blue" })).toEqual({ ok: true, status: 200 });
+      } finally { close?.(); }
+    });
   });
 
 });
