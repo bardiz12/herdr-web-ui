@@ -867,6 +867,7 @@ export const ZH: Record<string, string> = {
   "That item no longer exists on the PC. Refresh and try again.": "该项目在电脑上已不存在。请刷新后重试。",
   "It changed on the PC while you were acting. Check it and try again.": "你操作期间电脑上的内容已更改。请检查后重试。",
   "The PC took too long to answer. Try again.": "电脑响应时间过长。请重试。",
+  "OpenCode did not confirm the answer. Check the question before sending again.": "未收到 OpenCode 的回答接收确认。请先检查问题，再决定是否重新发送。",
   "The PC could not do that. Try again; if it keeps failing, restart herdr web ui on the PC.": "电脑无法完成该操作。请重试；如果一直失败，请在电脑上重启 herdr web ui。",
   "Can't reach the PC. Check your connection, then try again.": "无法连接到电脑。请检查网络连接后重试。",
   "Something went wrong. Try again.": "出了点问题。请重试。",

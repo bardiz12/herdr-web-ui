@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { chromium } from "playwright-core";
 
 import panes from "../site/demo/fixtures/panes.json";
+import { JA } from "../src/lib/i18n.ja.ts";
+import { KO } from "../src/lib/i18n.ko.ts";
+import { ZH } from "../src/lib/i18n.zh.ts";
 import { appFaces } from "./app-faces.ts";
 import { chromePath } from "./chrome-path.ts";
 import { buildDemoApp } from "./demo-build.ts";
@@ -12,6 +15,8 @@ import { buildDemoApp } from "./demo-build.ts";
 // Only the demo transport and fictional question cards; never a user's OpenCode session.
 const app = mkdtempSync(join(tmpdir(), "opencode-prompt-browser-"));
 const shots = process.env.OPENCODE_PROMPT_SHOTS;
+const unconfirmedKey = "OpenCode did not confirm the answer. Check the question before sending again.";
+const translations: Record<string, Record<string, string>> = { en: {}, ko: KO, ja: JA, zh: ZH };
 const prompt = {
   id: "native-second", agent: "opencode", kind: "question", title: "Tools",
   question: "Which tools should the fictional project use?", body: null,
@@ -53,11 +58,12 @@ try {
   try {
     if (shots) mkdirSync(shots, { recursive: true });
     for (const width of [390, 1440]) for (const theme of ["light", "dark"]) for (const navigation of ["back", "chip"]) {
+      const language = width === 390 ? (theme === "light" ? "ko" : "ja") : (theme === "light" ? "zh" : "en");
       const context = await browser.newContext({
         viewport: { width, height: 900 }, isMobile: width === 390, hasTouch: width === 390, deviceScaleFactor: width === 390 ? 3 : 1,
       });
       try {
-        await context.addInitScript((theme) => localStorage.setItem("herdr-web-ui:settings", JSON.stringify({ language: "en", theme })), theme);
+        await context.addInitScript((settings) => localStorage.setItem("herdr-web-ui:settings", JSON.stringify(settings)), { language, theme });
         const page = await context.newPage();
         const errors: string[] = [];
         page.on("pageerror", (error) => errors.push(error.message));
@@ -97,8 +103,9 @@ try {
         await page.locator(".prompt-card").waitFor();
         await page.locator(".prompt-card-submit").click();
         await page.locator(".prompt-card-error").waitFor();
-        assert.equal(await page.locator(".prompt-card-error").textContent(), "fixture_delivery_unconfirmed", "show the uncertain-delivery advice instead of inviting a blind retry");
-        console.log(`PASS ${width} ${theme} ${navigation}: drafts survive navigation and remount`);
+        assert.equal(await page.locator(".prompt-card-error").textContent(), translations[language]?.[unconfirmedKey] ?? unconfirmedKey, "show the shipped translation rather than the server's detail");
+        if (shots) await page.screenshot({ path: join(shots, `${width}-${theme}-${navigation}-${language}-unconfirmed.png`) });
+        console.log(`PASS ${width} ${theme} ${navigation} ${language}: drafts, combined answers and localized delivery advice`);
       } finally { await context.close(); }
     }
   } finally {

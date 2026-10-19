@@ -865,6 +865,7 @@ export const JA: Record<string, string> = {
   "That item no longer exists on the PC. Refresh and try again.": "その項目は PC にもうありません。更新してからもう一度お試しください。",
   "It changed on the PC while you were acting. Check it and try again.": "操作中に PC 側で変更されました。確認してからもう一度お試しください。",
   "The PC took too long to answer. Try again.": "PC の応答に時間がかかりすぎました。もう一度お試しください。",
+  "OpenCode did not confirm the answer. Check the question before sending again.": "OpenCode から回答の受信確認が届きませんでした。再送する前に質問を確認してください。",
   "The PC could not do that. Try again; if it keeps failing, restart herdr web ui on the PC.": "PC でその操作を実行できませんでした。もう一度お試しください。失敗が続く場合は PC で herdr web ui を再起動してください。",
   "Can't reach the PC. Check your connection, then try again.": "PC に接続できません。接続を確認してからもう一度お試しください。",
   "Something went wrong. Try again.": "問題が発生しました。もう一度お試しください。",
