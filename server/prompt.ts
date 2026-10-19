@@ -165,6 +165,8 @@ type ParsedPrompt = InteractivePrompt & {
     totalSteps: number;
     options: OpenCodeFormFieldOption[];
     sessionID: string;
+    state: OpenCodePromptEntry;
+    revision: number;
   };
   menuLabels: string[];
   selectedIndex: number;
@@ -3171,7 +3173,51 @@ interface OpenCodeFormDraft {
   answers: Record<string, string | string[]>;
   updatedAt: number;
 }
-const openCodeFormDrafts = new Map<string, OpenCodeFormDraft>();
+
+interface OpenCodePromptEntry {
+  sessionID: string;
+  form: string | null;
+  draft?: OpenCodeFormDraft;
+  revision: number;
+  issued: number;
+  applied: number;
+  updatedAt: number;
+}
+
+/** Owned by one server; reads cannot overwrite progress made after they started. */
+export class OpenCodePromptState {
+  readonly entries = new Map<string, OpenCodePromptEntry>();
+  constructor(readonly now: () => number = Date.now) {}
+
+  prune(): void {
+    for (const [id, entry] of this.entries) if (this.now() - entry.updatedAt >= 30 * 60_000) this.entries.delete(id);
+  }
+
+  reconcile(panes: readonly HerdrPane[]): void {
+    this.prune();
+    for (const [id, entry] of this.entries) {
+      const pane = panes.find((pane) => pane.pane_id === id);
+      if (!pane || opencodeSessionId(pane) !== entry.sessionID || pane.agent !== "opencode") this.entries.delete(id);
+    }
+  }
+
+  begin(paneId: string, sessionID: string): OpenCodePromptEntry {
+    this.prune();
+    let entry = this.entries.get(paneId);
+    if (!entry || entry.sessionID !== sessionID) {
+      entry = { sessionID, form: null, revision: 0, issued: 0, applied: 0, updatedAt: this.now() };
+      this.entries.delete(paneId);
+      this.entries.set(paneId, entry);
+      if (this.entries.size > 64) this.entries.delete(this.entries.keys().next().value!);
+    }
+    return entry;
+  }
+
+  forget(paneId: string): void { this.entries.delete(paneId); }
+  clear(): void { this.entries.clear(); }
+}
+
+const defaultOpenCodeState = new OpenCodePromptState();
 
 /** Each pane's rollout, resolved for its collapsed queue: a poll every 2s would otherwise redo it. */
 const queueRollouts = new Map<string, { path: string | null; at: number }>();
@@ -3584,7 +3630,7 @@ export async function claudeHeldIsGrey(paneId: string, prompt: InteractivePrompt
     .then((read) => same(claudeGreyInput(read.text)), () => false);
 }
 
-async function readPrompt(paneId: string, codexHome?: string, openCodeStateDir?: string): Promise<{ agent: string; status: string; prompt: InteractivePrompt | null; pane: HerdrPane; panes: HerdrPane[] }> {
+async function readPrompt(paneId: string, codexHome?: string, openCodeStateDir?: string, openCodeState = defaultOpenCodeState, signal?: AbortSignal): Promise<{ agent: string; status: string; prompt: InteractivePrompt | null; pane: HerdrPane; panes: HerdrPane[] }> {
   const { panes } = await sessionSnapshot();
   // a closed pane's wait has ended too
   for (const logged of fallbackLogged) if (!panes.some((candidate) => candidate.pane_id === logged)) fallbackLogged.delete(logged);
@@ -3592,19 +3638,21 @@ async function readPrompt(paneId: string, codexHome?: string, openCodeStateDir?:
   for (const known of answerTurns.keys()) if (!panes.some((candidate) => candidate.pane_id === known)) answerTurns.delete(known);
   for (const known of heldCandidates.keys()) if (!panes.some((candidate) => candidate.pane_id === known)) heldCandidates.delete(known);
   for (const known of chatSent.keys()) if (!panes.some((candidate) => candidate.pane_id === known)) chatSent.delete(known);
-  for (const known of openCodeFormDrafts.keys()) if (!panes.some((candidate) => candidate.pane_id === known)) openCodeFormDrafts.delete(known);
+  openCodeState.reconcile(panes);
   const pane = panes.find((candidate) => candidate.pane_id === paneId);
   if (!pane) throw new HerdrError("pane_not_found", `pane ${paneId} not found`);
-  const agent = pane.agent ?? pane.agent_session?.agent ?? "";
+  const agent = pane.agent ?? "";
   const status = pane.agent_status;
   // counted right before the screen is read, after the snapshot: what matters is whether an
   // answer ran while the screen was being read
   const turns = answerTurns.get(paneId) ?? 0;
-  const known = await readKnownPrompt(paneId, pane, agent, codexHome, panes, openCodeStateDir);
+  const known = await readKnownPrompt(paneId, pane, agent, codexHome, panes, openCodeStateDir, openCodeState, signal);
+  if (known.stale) return { agent, status, prompt: null, pane, panes };
   // an omo form just answered has closed, while herdr still reports the wait for a moment: that
   // is no screen to answer, and its fallback card would flash up after the form's last answer
   const settling = Date.now() - (formsAnswered.get(paneId) ?? 0) < FORM_SETTLE_MS;
-  if (known.prompt !== null || status !== "blocked" || !agent || settling) {
+  // Native OpenCode questions never fall through to guessed terminal keys.
+  if (agent === "opencode" || known.prompt !== null || status !== "blocked" || !agent || settling) {
     fallbackLogged.delete(paneId);
     return { agent, status, prompt: asked(paneId, known.prompt, turns), pane, panes };
   }
@@ -3653,33 +3701,48 @@ async function readKnownPrompt(
   codexHome?: string,
   panes: HerdrPane[] = [],
   openCodeStateDir?: string,
-): Promise<{ prompt: InteractivePrompt | null; screen?: string }> {
-  if (agent === "opencode" || pane.agent_session?.agent === "opencode") {
+  openCodeState = defaultOpenCodeState,
+  signal?: AbortSignal,
+): Promise<{ prompt: InteractivePrompt | null; screen?: string; stale?: boolean }> {
+  if (agent === "opencode") {
     const sessionID = opencodeSessionId(pane);
     if (!sessionID) return { prompt: null };
     const config = readOpenCodeService(openCodeStateDir);
     if (!config) return { prompt: null };
-    const forms = await listPendingQuestionForms(config, sessionID);
+    const state = openCodeState.begin(paneId, sessionID);
+    const revision = state.revision;
+    const issued = ++state.issued;
+    const forms = await listPendingQuestionForms(config, sessionID, fetch, signal);
+    if (signal?.aborted || openCodeState.entries.get(paneId) !== state || state.revision !== revision || issued < state.applied) return { prompt: null, stale: true };
+    state.applied = issued;
     if (!forms) return { prompt: null };
     if (forms.length === 0) {
-      openCodeFormDrafts.delete(paneId);
+      state.draft = undefined;
+      state.form = null;
+      state.revision++;
       return { prompt: null };
     }
     const form = forms[0]!;
     if (form.fields.length === 0) return { prompt: null };
 
-    const draft = openCodeFormDrafts.get(paneId);
+    // Schema changes under a reused form id are a replacement too.
+    const identity = JSON.stringify(form);
+    if (state.form !== identity) {
+      state.draft = undefined;
+      state.form = identity;
+      state.revision++;
+      state.updatedAt = openCodeState.now();
+    }
+    const draft = state.draft;
     let stepIndex = 0;
     if (draft && draft.formId === form.id) {
       stepIndex = Math.min(draft.stepIndex, form.fields.length - 1);
-    } else if (draft && draft.formId !== form.id) {
-      openCodeFormDrafts.delete(paneId);
     }
 
     const field = form.fields[stepIndex]!;
     const multiSelect = field.type === "multiselect";
     const rawOptions = field.options ?? [];
-    const customAllowed = !multiSelect && (field.custom === true || rawOptions.length === 0);
+    const customAllowed = field.custom === true || rawOptions.length === 0;
 
     let options: InteractivePromptOption[];
     let customOptionIndex: number | null = null;
@@ -3718,6 +3781,7 @@ async function readKnownPrompt(
         defaultOptionIndices = savedAnswer
           .map((val) => rawOptions.findIndex((opt) => opt.value === val))
           .filter((idx) => idx >= 0);
+        if (customAllowed) defaultCustomText = savedAnswer.filter((value) => !rawOptions.some((option) => option.value === value)).join("\n") || undefined;
       } else if (typeof savedAnswer === "string") {
         const optIdx = rawOptions.findIndex((opt) => opt.value === savedAnswer);
         if (optIdx >= 0) {
@@ -3758,9 +3822,11 @@ async function readKnownPrompt(
           totalSteps: form.fields.length,
           options: rawOptions,
           sessionID,
+          state,
+          revision: state.revision,
         },
       },
-      { call: `${form.id}:${field.key}:${stepIndex}` },
+      { call: `${sessionID}:${identity}:${field.key}:${stepIndex}` },
     );
 
     return { prompt: publicPrompt(parsed) };
@@ -3907,6 +3973,8 @@ export interface PromptRequestOptions {
   readOnly?: boolean;
   /** OpenCode state dir where service.json lives; tests use an isolated directory */
   openCodeStateDir?: string;
+  /** Each server owns its drafts and clears them when stopped. */
+  openCodeState?: OpenCodePromptState;
 }
 
 /**
@@ -3931,7 +3999,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
       if (request.method !== "GET") return badRequest("method_not_allowed", "GET is required.");
       const paneId = url.searchParams.get("pane_id")?.trim();
       if (!paneId) return badRequest("missing_pane_id", "pane_id is required.");
-      const read = await readPrompt(paneId, options.codexHome, options.openCodeStateDir);
+      const read = await readPrompt(paneId, options.codexHome, options.openCodeStateDir, options.openCodeState, request.signal);
       const { agent, status } = read;
       // `plan=0` is how a connection server asks for a watching device through its PC proxy, which
       // reaches this PC with its own credential: it only ever narrows the answer
@@ -3954,6 +4022,7 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
     }
 
     if (request.method !== "POST") return badRequest("method_not_allowed", "POST is required.");
+    if (options.readOnly) return jsonResponse({ error: { code: "read_only", message: "This device can only watch." } }, 403);
     let body: PromptAnswer;
     try {
       body = await request.json() as PromptAnswer;
@@ -3973,7 +4042,10 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
     const response = await serialize(body.pane_id, async () => {
       // given up while it waited its turn: nothing is read, opened or sent for it
       if (request.signal.aborted) return promptChanged();
-      const { prompt, agent, pane, panes } = await readPrompt(body.pane_id, options.codexHome, options.openCodeStateDir);
+      const deadlineAt = Date.now() + 4_000;
+      const deadline = AbortSignal.any([request.signal, AbortSignal.timeout(4_000)]);
+      const openCodeState = options.openCodeState ?? defaultOpenCodeState;
+      const { prompt, agent, pane, panes } = await readPrompt(body.pane_id, options.codexHome, options.openCodeStateDir, openCodeState, deadline);
       // a plan card's id carries its plan file's revision: the file as it is now must match too
       if (!prompt || (await withPlanFile(prompt, options.claudeTranscript?.(body.pane_id)))!.id !== body.prompt_id) return promptChanged();
       log.matched = true;
@@ -3981,16 +4053,32 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
       const parsedPrompt = parsedByPublicPrompt.get(prompt);
       if (parsedPrompt?.responder === "opencode-question" && parsedPrompt.openCodeForm) {
         const openCodeForm = parsedPrompt.openCodeForm;
+        const state = openCodeForm.state;
+        const asking = askings.get(body.pane_id);
+        const current = (): boolean => !deadline.aborted
+          && openCodeState.entries.get(body.pane_id) === state && state.revision === openCodeForm.revision
+          && askings.get(body.pane_id) === asking && asking?.content === parsedPrompt.id;
+        // The lookup above awaited HTTP. Neither its pane nor its form is a live binding now.
+        const stillBound = async (): Promise<boolean> => {
+          if (!current()) return false;
+          const snapshot = await sessionSnapshot(undefined, Math.max(1, deadlineAt - Date.now())).catch(() => null);
+          if (!snapshot) return false;
+          openCodeState.reconcile(snapshot.panes);
+          const live = snapshot.panes.find((candidate) => candidate.pane_id === body.pane_id);
+          return !!live && live.agent === "opencode" && opencodeSessionId(live) === openCodeForm.sessionID && current();
+        };
+        if (!(await stillBound())) return promptChanged();
+        const navigating = body.step_back === true || body.step_index !== undefined;
         const supplied = [
           body.option_index !== undefined,
           body.option_indices !== undefined,
           body.custom_text !== undefined,
-          body.step_back === true,
-          body.step_index !== undefined,
         ].filter(Boolean).length;
-        if (supplied !== 1) return badRequest("invalid_answer", "Exactly one answer is required.");
+        if (supplied !== 1 && !navigating) return badRequest("invalid_answer", "Exactly one answer is required.");
+        if (supplied > 1 || (navigating && supplied !== 0) || (body.step_back === true && body.step_index !== undefined)
+          || (!navigating && body.draft !== undefined)) return badRequest("invalid_answer", "Exactly one answer is required.");
 
-        if (body.step_back === true || body.step_index !== undefined) {
+        if (navigating) {
           let targetStep = openCodeForm.stepIndex - 1;
           if (body.step_index !== undefined) {
             if (!Number.isInteger(body.step_index) || body.step_index < 0 || body.step_index >= openCodeForm.stepIndex) {
@@ -4002,21 +4090,31 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
             return badRequest("invalid_answer", "Cannot step back from the first step.");
           }
 
-          let draft = openCodeFormDrafts.get(body.pane_id);
-          if (!draft || draft.formId !== openCodeForm.formId) {
-            draft = {
-              formId: openCodeForm.formId,
-              stepIndex: targetStep,
-              answers: {},
-              updatedAt: Date.now(),
-            };
-            openCodeFormDrafts.set(body.pane_id, draft);
-          } else {
-            draft.stepIndex = targetStep;
-            draft.updatedAt = Date.now();
+          const draft = state.draft ? { ...state.draft, answers: { ...state.draft.answers } } : {
+            formId: openCodeForm.formId,
+            stepIndex: targetStep,
+            answers: {},
+            updatedAt: openCodeState.now(),
+          };
+          // Navigation carries the current step's unsent edits, including an explicit clear.
+          if (body.draft !== undefined) {
+            if (typeof body.draft !== "object" || body.draft === null
+              || !Array.isArray(body.draft.option_indices) || typeof body.draft.custom_text !== "string"
+              || body.draft.custom_text.length > 12_000
+              || body.draft.option_indices.some((index) => !Number.isInteger(index) || index < 0 || index >= openCodeForm.options.length)
+              || (!parsedPrompt.multi_select && body.draft.option_indices.length > 1)
+              || (parsedPrompt.custom_option_index === null && body.draft.custom_text !== "")) return badRequest("invalid_answer", "Invalid draft.");
+            const selected = body.draft.option_indices.map((index) => openCodeForm.options[index]!.value);
+            const custom = body.draft.custom_text;
+            draft.answers[openCodeForm.fieldKey] = parsedPrompt.multi_select ? [...selected, ...(custom ? [custom] : [])] : custom || selected[0] || "";
           }
-
-          form.answered = contentId(prompt);
+          if (JSON.stringify(draft.answers).length > 65_536) return badRequest("invalid_answer", "The form answers are too large.");
+          draft.stepIndex = targetStep;
+          draft.updatedAt = openCodeState.now();
+          state.draft = draft;
+          state.updatedAt = draft.updatedAt;
+          state.revision++;
+          askingEnded(body.pane_id);
           return jsonResponse({ ok: true });
         }
 
@@ -4024,8 +4122,8 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
         if (body.custom_text !== undefined) {
           if (typeof body.custom_text !== "string") return badRequest("invalid_answer", "Custom text must be a string.");
           const text = body.custom_text.trim();
-          if (!text || parsedPrompt.custom_option_index === null || parsedPrompt.multi_select) return badRequest("invalid_answer", "This prompt does not accept a custom answer.");
-          answerValue = text;
+          if (!text || text.length > 12_000 || parsedPrompt.custom_option_index === null) return badRequest("invalid_answer", "This prompt does not accept a custom answer.");
+          answerValue = parsedPrompt.multi_select ? [text] : text;
         } else if (body.option_indices !== undefined) {
           if (!Array.isArray(body.option_indices)) return badRequest("invalid_answer", "Option indices must be an array.");
           if (!parsedPrompt.multi_select || body.option_indices.length === 0) return badRequest("invalid_answer", "This prompt requires one or more selections.");
@@ -4042,23 +4140,23 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
           answerValue = openCodeForm.options[index!]!.value;
         }
 
-        let draft = openCodeFormDrafts.get(body.pane_id);
-        if (!draft || draft.formId !== openCodeForm.formId) {
-          draft = {
-            formId: openCodeForm.formId,
-            stepIndex: openCodeForm.stepIndex,
-            answers: {},
-            updatedAt: Date.now(),
-          };
-          openCodeFormDrafts.set(body.pane_id, draft);
-        }
+        const draft = state.draft ? { ...state.draft, answers: { ...state.draft.answers } } : {
+          formId: openCodeForm.formId,
+          stepIndex: openCodeForm.stepIndex,
+          answers: {},
+          updatedAt: openCodeState.now(),
+        };
         draft.answers[openCodeForm.fieldKey] = answerValue;
-        draft.updatedAt = Date.now();
+        if (JSON.stringify(draft.answers).length > 65_536) return badRequest("invalid_answer", "The form answers are too large.");
+        draft.updatedAt = openCodeState.now();
+        state.updatedAt = draft.updatedAt;
 
         const isLastStep = openCodeForm.stepIndex >= openCodeForm.totalSteps - 1;
         if (!isLastStep) {
           draft.stepIndex += 1;
-          form.answered = contentId(prompt);
+          state.draft = draft;
+          state.revision++;
+          askingEnded(body.pane_id);
           return jsonResponse({ ok: true });
         }
 
@@ -4067,19 +4165,26 @@ export async function handlePromptRequest(request: Request, url: URL, options: P
           return jsonResponse({ error: { code: "service_unavailable", message: "OpenCode service is not available." } }, 502);
         }
 
-        const replyResult = await replyOpenCodeForm(config, openCodeForm.sessionID, openCodeForm.formId, draft.answers);
+        if (!(await stillBound())) return promptChanged();
+        const replyResult = await replyOpenCodeForm(config, openCodeForm.sessionID, openCodeForm.formId, draft.answers, fetch, deadline);
+        if (!(await stillBound())) return promptChanged();
         if (replyResult.ok) {
-          openCodeFormDrafts.delete(body.pane_id);
+          state.draft = undefined;
+          state.form = null;
+          state.revision++;
           formsAnswered.set(body.pane_id, Date.now());
           if (formsAnswered.size > 64) formsAnswered.delete(formsAnswered.keys().next().value!);
           askingEnded(body.pane_id);
-          form.answered = contentId(prompt);
           return jsonResponse({ ok: true });
         }
         if (replyResult.status === 409) {
-          openCodeFormDrafts.delete(body.pane_id);
+          state.draft = undefined;
+          state.form = null;
+          state.revision++;
           return jsonResponse({ error: { code: "prompt_changed", message: "The form has already been settled." } }, 409);
         }
+        state.draft = draft;
+        state.revision++;
         return jsonResponse({ error: { code: "reply_failed", message: `Failed to reply to OpenCode form (HTTP ${replyResult.status}).` } }, 502);
       }
 

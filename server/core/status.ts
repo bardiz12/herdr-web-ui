@@ -20,7 +20,7 @@ import { bridgeAgentNews, MachineManager } from "../machines.ts";
 import { omoPanes } from "../omo.ts";
 import { OMO_ALIASES, OmoStatus } from "../omo-status.ts";
 import type { PendingInputs } from "../pending-input.ts";
-import { promptWaitEnded } from "../prompt.ts";
+import { promptWaitEnded, type OpenCodePromptState } from "../prompt.ts";
 import { type AlertTiming, createPushService, defaultStateDir } from "../push.ts";
 import { SessionPlans } from "../session-plan.ts";
 import type { Telemetry } from "../telemetry.ts";
@@ -42,6 +42,7 @@ export function createStatusHub<Lease>({ options, devices, clients, present, pen
     pushLoopbackHttp?: boolean;
     backgroundWait?: { grace: number; limit: number };
     statusNow?: () => number;
+    openCodeState?: OpenCodePromptState;
   };
   devices: DeviceStore;
   clients: Set<Client>;
@@ -235,6 +236,7 @@ export function createStatusHub<Lease>({ options, devices, clients, present, pen
 
   const collector = startStatusCollector({
     onStatus: (paneId, read, agent, replay) => {
+      if (agent !== "opencode") options.openCodeState?.forget(paneId);
       const raw = launchedAgents.settle(paneId, read);
       gjc.poll();
       // read back from a snapshot around a gap between subscriptions. An OmO pane's status there
@@ -286,6 +288,7 @@ export function createStatusHub<Lease>({ options, devices, clients, present, pen
       push.onStatus(paneId, alertStatus("idle", waits.waiting(paneId))).catch(logPushError);
     },
     onBaseline: (panes) => {
+      options.openCodeState?.reconcile(panes);
       // A resting baseline never reholds old work after a bridge restart.
       for (const pane of panes) if (pane.agent === "claude") waits.seed(pane.pane_id, pane.agent_status);
       push.seed(panes.map((pane) => ({ ...pane, agent_status: alertStatus(pane.agent_status, waits.waiting(pane.pane_id)) })));
@@ -310,6 +313,7 @@ export function createStatusHub<Lease>({ options, devices, clients, present, pen
       push.resync(panes.map((pane) => ({ ...pane, agent_status: alertStatus(settled(pane), waits.waiting(pane.pane_id)) })), newer);
     },
     onPaneEnded: (paneId) => {
+      options.openCodeState?.forget(paneId);
       if (usageLogin.ended(paneId)) usage.invalidate();
       holdPendingPane(paneId, { code: "pane_not_found", message: "The pane ended; its pending messages were not sent" });
       pending.forget(paneId);

@@ -1110,6 +1110,8 @@ export interface PromptAnswer {
   custom_text?: string;
   step_back?: boolean;
   step_index?: number;
+  /** Unsent edits for the current OpenCode step, saved only when navigating back. */
+  draft?: { option_indices: number[]; custom_text: string };
 }
 
 /**

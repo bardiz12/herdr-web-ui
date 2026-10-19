@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { createServer } from "./index.ts";
-import { herdrRpc, sessionSnapshot, workspaceClose, workspaceCreate } from "./herdr/client.ts";
-import { opencodeAuthHeader } from "./opencode-service.ts";
+import { herdrRpc, sessionSnapshot, subscribeEvents, workspaceClose, workspaceCreate } from "./herdr/client.ts";
+import { opencodeAuthHeader, type OpenCodeFormInfo } from "./opencode-service.ts";
 import type { InteractivePrompt } from "../shared/protocol.ts";
 
 const root = mkdtempSync(join(tmpdir(), "herdr-web-ui-opencode-prompt-contract-"));
@@ -18,8 +18,8 @@ const PASSWORD = "test-secret-password";
 const SESSION_SINGLE = "ses_opencodeQuestion01";
 const SESSION_MULTI = "ses_opencodeQuestion02";
 
-let pendingForms: Record<string, any[]> = {};
-let receivedReplies: Array<{ sessionID: string; formID: string; answer: any; auth: string }> = [];
+let pendingForms: Record<string, OpenCodeFormInfo[]> = {};
+let receivedReplies: Array<{ sessionID: string; formID: string; answer: Record<string, string | string[]>; auth: string }> = [];
 let replyStatusOverride = 0;
 
 beforeAll(async () => {
@@ -55,7 +55,7 @@ beforeAll(async () => {
         }
         const sessionID = decodeURIComponent(replyMatch[1]!);
         const formID = decodeURIComponent(replyMatch[2]!);
-        const body = (await req.json()) as { answer: any };
+        const body = (await req.json()) as { answer: Record<string, string | string[]> };
         receivedReplies.push({ sessionID, formID, answer: body.answer, auth });
         // remove pending form
         pendingForms[sessionID] = (pendingForms[sessionID] ?? []).filter((f) => f.id !== formID);
@@ -100,12 +100,21 @@ async function setupOpencodePane(sessionID: string, label: string): Promise<stri
   workspaces.push(created.workspace.workspace_id);
   const paneId = created.root_pane.pane_id;
 
-  await herdrRpc("pane.send_text", { pane_id: paneId, text: `${fakeOpencode}\n` });
-  for (const deadline = Date.now() + 10_000;;) {
-    const pane = (await sessionSnapshot()).panes.find((candidate) => candidate.pane_id === paneId);
-    if (pane?.agent === "opencode") break;
-    if (Date.now() > deadline) throw new Error("test opencode did not start");
-    await Bun.sleep(50);
+  const started = Promise.withResolvers<void>();
+  const detected = Promise.withResolvers<void>();
+  const subscription = subscribeEvents([{ type: "pane.agent_status_changed", pane_id: paneId }], {
+    onStarted: () => started.resolve(),
+    onEvent: (frame) => { if (frame.data?.agent === "opencode") detected.resolve(); },
+    onError: (error) => { started.reject(error); detected.reject(error); },
+  });
+  const timeout = setTimeout(() => detected.reject(new Error("test opencode did not start")), 10_000);
+  try {
+    await started.promise;
+    await herdrRpc("pane.send_text", { pane_id: paneId, text: `${fakeOpencode}\n` });
+    await detected.promise;
+  } finally {
+    clearTimeout(timeout);
+    subscription.close();
   }
 
   // Report OpenCode session and blocked status to herdr
@@ -124,20 +133,43 @@ async function setupOpencodePane(sessionID: string, label: string): Promise<stri
     state: "blocked",
   });
 
-  let blocked = false;
-  for (let i = 0; i < 40; i++) {
-    const pane = (await sessionSnapshot()).panes.find((p) => p.pane_id === paneId);
-    if (pane?.agent_session?.agent === "opencode" && pane?.agent_status === "blocked") {
-      blocked = true;
-      break;
-    }
-    await Bun.sleep(50);
-  }
-  if (!blocked) throw new Error("test opencode did not become blocked");
+  const pane = (await sessionSnapshot()).panes.find((p) => p.pane_id === paneId);
+  expect(pane?.agent_session?.agent).toBe("opencode");
+  expect(pane?.agent_status).toBe("blocked");
   return paneId;
 }
 
+async function readCard(paneId: string): Promise<InteractivePrompt> {
+  const response = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
+  expect(response.status).toBe(200);
+  const text = await response.text();
+  expect(text).not.toContain(PASSWORD);
+  expect(text).not.toContain(`http://127.0.0.1:${mockPort}`);
+  const body = JSON.parse(text) as { prompt: InteractivePrompt | null };
+  if (!body.prompt) throw new Error("Expected a native question card");
+  return body.prompt;
+}
+
 describe("opencode prompt contract", () => {
+  it("drops buffered answers when the server stops", async () => {
+    const sessionID = "ses_opencodeRestart";
+    pendingForms[sessionID] = [{
+      id: "form_restart", sessionID, title: "Restart", metadata: { kind: "question" },
+      fields: [{ key: "first", type: "string", custom: true }, { key: "second", type: "string", custom: true }],
+    }];
+    const paneId = await setupOpencodePane(sessionID, "restart");
+    const first = await readCard(paneId);
+    const response = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt/answer`, {
+      method: "POST", body: JSON.stringify({ pane_id: paneId, prompt_id: first.id, custom_text: "buffered" }),
+    });
+    expect(response.status).toBe(200);
+    expect((await readCard(paneId)).steps?.[1]?.current).toBe(true);
+    server.stop();
+    server = createServer({ port: 0, hostname: "127.0.0.1", token: "", stateDir: join(root, "server-state"), openCodeStateDir: root });
+    await server.statusReady;
+    expect((await readCard(paneId)).steps?.[0]?.current).toBe(true);
+  });
+
   it("detects single question form and answers it via native HTTP API", async () => {
     pendingForms[SESSION_SINGLE] = [
       {
@@ -164,17 +196,7 @@ describe("opencode prompt contract", () => {
     const paneId = await setupOpencodePane(SESSION_SINGLE, "single");
 
     // Poll GET /api/pane/prompt
-    let prompt: InteractivePrompt | null = null;
-    for (let i = 0; i < 50; i++) {
-      const promptRes = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
-      expect(promptRes.status).toBe(200);
-      const promptBody = (await promptRes.json()) as { prompt: InteractivePrompt | null };
-      if (promptBody.prompt) {
-        prompt = promptBody.prompt;
-        break;
-      }
-      await Bun.sleep(50);
-    }
+    const prompt = await readCard(paneId);
     expect(prompt).not.toBeNull();
     expect(prompt!.agent).toBe("opencode");
     expect(prompt!.kind).toBe("question");
@@ -193,7 +215,10 @@ describe("opencode prompt contract", () => {
       }),
     });
     expect(answerRes.status).toBe(200);
-    const answerBody = await answerRes.json();
+    const answerText = await answerRes.text();
+    expect(answerText).not.toContain(PASSWORD);
+    expect(answerText).not.toContain(`http://127.0.0.1:${mockPort}`);
+    const answerBody = JSON.parse(answerText);
     expect(answerBody).toEqual({ ok: true });
 
     // Verify mock server received reply with Basic auth and answer
@@ -243,16 +268,7 @@ describe("opencode prompt contract", () => {
     const paneId = await setupOpencodePane(SESSION_MULTI, "multi");
 
     // 1. Fetch step 1
-    let step1: InteractivePrompt | null = null;
-    for (let i = 0; i < 50; i++) {
-      const res1 = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
-      const body1 = (await res1.json()) as { prompt: InteractivePrompt | null };
-      if (body1.prompt) {
-        step1 = body1.prompt;
-        break;
-      }
-      await Bun.sleep(50);
-    }
+    const step1 = await readCard(paneId);
     expect(step1).not.toBeNull();
     expect(step1!.question).toBe("Which frontend framework?");
     expect(step1!.steps).toBeDefined();
@@ -275,16 +291,7 @@ describe("opencode prompt contract", () => {
     expect(receivedReplies.length).toBe(0);
 
     // 2. Fetch step 2
-    let step2: InteractivePrompt | null = null;
-    for (let i = 0; i < 50; i++) {
-      const res2 = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
-      const body2 = (await res2.json()) as { prompt: InteractivePrompt | null };
-      if (body2.prompt && body2.prompt.question === "Select tooling") {
-        step2 = body2.prompt;
-        break;
-      }
-      await Bun.sleep(50);
-    }
+    const step2 = await readCard(paneId);
     expect(step2).not.toBeNull();
     expect(step2!.question).toBe("Select tooling");
     expect(step2!.multi_select).toBe(true);
@@ -338,16 +345,7 @@ describe("opencode prompt contract", () => {
 
     const paneId = await setupOpencodePane(SESSION_CUSTOM, "custom");
 
-    let prompt: InteractivePrompt | null = null;
-    for (let i = 0; i < 50; i++) {
-      const res = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
-      const body = (await res.json()) as { prompt: InteractivePrompt | null };
-      if (body.prompt) {
-        prompt = body.prompt;
-        break;
-      }
-      await Bun.sleep(50);
-    }
+    const prompt = await readCard(paneId);
     expect(prompt).not.toBeNull();
     expect(prompt!.custom_option_index).toBe(0);
 
@@ -414,16 +412,7 @@ describe("opencode prompt contract", () => {
     const paneId = await setupOpencodePane(SESSION_STEP_BACK, "stepback");
 
     // 1. Fetch step 0 (framework)
-    let prompt0: InteractivePrompt | null = null;
-    for (let i = 0; i < 50; i++) {
-      const res = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
-      const body = (await res.json()) as { prompt: InteractivePrompt | null };
-      if (body.prompt && body.prompt.question === "Which frontend framework?") {
-        prompt0 = body.prompt;
-        break;
-      }
-      await Bun.sleep(50);
-    }
+    const prompt0 = await readCard(paneId);
     expect(prompt0).not.toBeNull();
     expect(prompt0!.can_step_back).toBeFalsy();
     expect(prompt0!.steps?.[0]?.current).toBe(true);
@@ -441,16 +430,7 @@ describe("opencode prompt contract", () => {
     expect(ans0.status).toBe(200);
 
     // 2. Fetch step 1 (styling)
-    let prompt1: InteractivePrompt | null = null;
-    for (let i = 0; i < 50; i++) {
-      const res = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
-      const body = (await res.json()) as { prompt: InteractivePrompt | null };
-      if (body.prompt && body.prompt.question === "Which styling library?") {
-        prompt1 = body.prompt;
-        break;
-      }
-      await Bun.sleep(50);
-    }
+    const prompt1 = await readCard(paneId);
     expect(prompt1).not.toBeNull();
     expect(prompt1!.can_step_back).toBe(true);
     expect(prompt1!.steps?.[0]?.answered).toBe(true);
@@ -469,16 +449,7 @@ describe("opencode prompt contract", () => {
     expect(backRes.status).toBe(200);
 
     // 3. Fetch step 0 again, verify default_option_index is preserved as React (0)
-    let prompt0Again: InteractivePrompt | null = null;
-    for (let i = 0; i < 50; i++) {
-      const res = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
-      const body = (await res.json()) as { prompt: InteractivePrompt | null };
-      if (body.prompt && body.prompt.question === "Which frontend framework?") {
-        prompt0Again = body.prompt;
-        break;
-      }
-      await Bun.sleep(50);
-    }
+    const prompt0Again = await readCard(paneId);
     expect(prompt0Again).not.toBeNull();
     expect(prompt0Again!.can_step_back).toBeFalsy();
     expect(prompt0Again!.default_option_index).toBe(0);
@@ -496,16 +467,7 @@ describe("opencode prompt contract", () => {
     expect(reviseAns.status).toBe(200);
 
     // 4. Fetch step 1 again and answer with "Tailwind" (0)
-    let prompt1Again: InteractivePrompt | null = null;
-    for (let i = 0; i < 50; i++) {
-      const res = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
-      const body = (await res.json()) as { prompt: InteractivePrompt | null };
-      if (body.prompt && body.prompt.question === "Which styling library?") {
-        prompt1Again = body.prompt;
-        break;
-      }
-      await Bun.sleep(50);
-    }
+    const prompt1Again = await readCard(paneId);
     expect(prompt1Again).not.toBeNull();
     const ans1 = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt/answer`, {
       method: "POST",
@@ -519,16 +481,7 @@ describe("opencode prompt contract", () => {
     expect(ans1.status).toBe(200);
 
     // 5. Fetch step 2 (notes), test direct step_index jump back to step 0
-    let prompt2: InteractivePrompt | null = null;
-    for (let i = 0; i < 50; i++) {
-      const res = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
-      const body = (await res.json()) as { prompt: InteractivePrompt | null };
-      if (body.prompt && body.prompt.question === "Any extra notes?") {
-        prompt2 = body.prompt;
-        break;
-      }
-      await Bun.sleep(50);
-    }
+    const prompt2 = await readCard(paneId);
     expect(prompt2).not.toBeNull();
     expect(prompt2!.can_step_back).toBe(true);
 
@@ -545,16 +498,7 @@ describe("opencode prompt contract", () => {
     expect(jumpRes.status).toBe(200);
 
     // Verify we're back at step 0 with Vue (1) preserved
-    let prompt0Jumped: InteractivePrompt | null = null;
-    for (let i = 0; i < 50; i++) {
-      const res = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
-      const body = (await res.json()) as { prompt: InteractivePrompt | null };
-      if (body.prompt && body.prompt.question === "Which frontend framework?") {
-        prompt0Jumped = body.prompt;
-        break;
-      }
-      await Bun.sleep(50);
-    }
+    const prompt0Jumped = await readCard(paneId);
     expect(prompt0Jumped).not.toBeNull();
     expect(prompt0Jumped!.default_option_index).toBe(1);
 
@@ -569,16 +513,7 @@ describe("opencode prompt contract", () => {
       }),
     });
 
-    let prompt1Adv: InteractivePrompt | null = null;
-    for (let i = 0; i < 50; i++) {
-      const res = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
-      const body = (await res.json()) as { prompt: InteractivePrompt | null };
-      if (body.prompt && body.prompt.question === "Which styling library?") {
-        prompt1Adv = body.prompt;
-        break;
-      }
-      await Bun.sleep(50);
-    }
+    const prompt1Adv = await readCard(paneId);
     expect(prompt1Adv).not.toBeNull();
     expect(prompt1Adv!.default_option_index).toBe(0); // Tailwind was previously chosen
 
@@ -593,16 +528,7 @@ describe("opencode prompt contract", () => {
     });
 
     // Finally at notes, submit custom_text
-    let prompt2Final: InteractivePrompt | null = null;
-    for (let i = 0; i < 50; i++) {
-      const res = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
-      const body = (await res.json()) as { prompt: InteractivePrompt | null };
-      if (body.prompt && body.prompt.question === "Any extra notes?") {
-        prompt2Final = body.prompt;
-        break;
-      }
-      await Bun.sleep(50);
-    }
+    const prompt2Final = await readCard(paneId);
     expect(prompt2Final).not.toBeNull();
 
     const finalAns = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt/answer`, {
@@ -651,16 +577,7 @@ describe("opencode prompt contract", () => {
 
     const paneId = await setupOpencodePane(SESSION_RETRY, "retry");
 
-    let prompt: InteractivePrompt | null = null;
-    for (let i = 0; i < 50; i++) {
-      const res = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
-      const body = (await res.json()) as { prompt: InteractivePrompt | null };
-      if (body.prompt && body.prompt.question === "Deploy Target") {
-        prompt = body.prompt;
-        break;
-      }
-      await Bun.sleep(50);
-    }
+    const prompt = await readCard(paneId);
     expect(prompt).not.toBeNull();
 
     // Simulate 500 error on first reply attempt
@@ -677,16 +594,7 @@ describe("opencode prompt contract", () => {
     expect(failRes.status).toBe(502);
 
     // Prompt is still available and previous draft wasn't deleted
-    let retryPrompt: InteractivePrompt | null = null;
-    for (let i = 0; i < 50; i++) {
-      const res = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneId)}`);
-      const body = (await res.json()) as { prompt: InteractivePrompt | null };
-      if (body.prompt && body.prompt.question === "Deploy Target") {
-        retryPrompt = body.prompt;
-        break;
-      }
-      await Bun.sleep(50);
-    }
+    const retryPrompt = await readCard(paneId);
     expect(retryPrompt).not.toBeNull();
     expect(retryPrompt!.default_option_index).toBe(0);
 
@@ -760,23 +668,8 @@ describe("opencode prompt contract", () => {
     receivedReplies = [];
 
     // 1. Fetch prompts for both instances
-    let promptA1: InteractivePrompt | null = null;
-    let promptB: InteractivePrompt | null = null;
-
-    for (let i = 0; i < 50; i++) {
-      if (!promptA1) {
-        const resA = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneIdA)}`);
-        const bodyA = (await resA.json()) as { prompt: InteractivePrompt | null };
-        if (bodyA.prompt?.question === "Service Name") promptA1 = bodyA.prompt;
-      }
-      if (!promptB) {
-        const resB = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneIdB)}`);
-        const bodyB = (await resB.json()) as { prompt: InteractivePrompt | null };
-        if (bodyB.prompt?.question === "Database Engine") promptB = bodyB.prompt;
-      }
-      if (promptA1 && promptB) break;
-      await Bun.sleep(50);
-    }
+    const promptA1 = await readCard(paneIdA);
+    const promptB = await readCard(paneIdB);
 
     expect(promptA1).not.toBeNull();
     expect(promptB).not.toBeNull();
@@ -818,16 +711,7 @@ describe("opencode prompt contract", () => {
     expect(receivedReplies[0]!.answer).toEqual({ db: "postgres" });
 
     // 4. Fetch step 2 of Instance A
-    let promptA2: InteractivePrompt | null = null;
-    for (let i = 0; i < 50; i++) {
-      const resA2 = await fetch(`http://127.0.0.1:${server.port}/api/pane/prompt?pane_id=${encodeURIComponent(paneIdA)}`);
-      const bodyA2 = (await resA2.json()) as { prompt: InteractivePrompt | null };
-      if (bodyA2.prompt?.question === "Environment") {
-        promptA2 = bodyA2.prompt;
-        break;
-      }
-      await Bun.sleep(50);
-    }
+    const promptA2 = await readCard(paneIdA);
     expect(promptA2).not.toBeNull();
     expect(promptA2!.can_step_back).toBe(true);
 
