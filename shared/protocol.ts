@@ -1101,7 +1101,7 @@ export interface InteractivePromptOption {
   description: string | null;
 }
 
-/** POST /api/pane/prompt/answer body. Exactly one of option_index / option_indices / custom_text / step_back / step_index. */
+/** POST /api/pane/prompt/answer body. One answer or navigation action; native OpenCode multiselect may combine option_indices and custom_text. */
 export interface PromptAnswer {
   pane_id: string;
   prompt_id: string;

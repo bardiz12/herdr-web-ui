@@ -253,6 +253,7 @@ describe("opencode prompt contract", () => {
           {
             key: "tools",
             type: "multiselect",
+            custom: true,
             title: "Tools",
             description: "Select tooling",
             options: [
@@ -306,6 +307,7 @@ describe("opencode prompt contract", () => {
         pane_id: paneId,
         prompt_id: step2!.id,
         option_indices: [0, 2],
+        custom_text: "custom-tool",
       }),
     });
     expect(ansRes2.status).toBe(200);
@@ -317,7 +319,7 @@ describe("opencode prompt contract", () => {
     expect(reply.formID).toBe("form_multi_1");
     expect(reply.answer).toEqual({
       framework: "react",
-      tools: ["eslint", "tailwind"],
+      tools: ["eslint", "tailwind", "custom-tool"],
     });
   });
 

@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { InteractivePrompt, PromptAnswer } from "../shared/protocol.ts";
-import { handlePromptRequest } from "./prompt.ts";
+import { handlePromptRequest, promptWaitEnded } from "./prompt.ts";
 import type { OpenCodeFormInfo } from "./opencode-service.ts";
 
 const deferred = <T>() => Promise.withResolvers<T>();
@@ -20,6 +20,10 @@ async function fixture(run: (f: {
   sent: string[];
   listing?: () => Promise<Response>;
   replying?: () => Promise<Response>;
+  snapshot?: () => Promise<void>;
+  serviceFile: string;
+  working(): void;
+  readResponse(): Promise<Response>;
   read(): Promise<InteractivePrompt>;
   answer(prompt: InteractivePrompt, choice: Omit<PromptAnswer, "pane_id" | "prompt_id">, signal?: AbortSignal): Promise<Response>;
 }) => Promise<void>) {
@@ -31,6 +35,8 @@ async function fixture(run: (f: {
   const answerUrl = new URL("http://localhost/api/pane/prompt/answer");
   const options = { openCodeStateDir: root };
   const f = {
+    serviceFile: join(root, "service.json"),
+    working: () => promptWaitEnded(paneId),
     session: session as string | null, closed: false,
     forms: [{
       id: "form_a", sessionID: session, title: "Fixture", metadata: { kind: "question" },
@@ -39,6 +45,12 @@ async function fixture(run: (f: {
     replies: [] as unknown[], sent: [] as string[],
     listing: undefined as (() => Promise<Response>) | undefined,
     replying: undefined as (() => Promise<Response>) | undefined,
+    snapshot: undefined as (() => Promise<void>) | undefined,
+    async readResponse() {
+      const response = await handlePromptRequest(new Request(url), url, options);
+      if (!response) throw new Error("Missing prompt response");
+      return response;
+    },
     async read() {
       const response = await handlePromptRequest(new Request(url), url, options);
       expect(response?.status).toBe(200);
@@ -87,7 +99,10 @@ async function fixture(run: (f: {
       };
       if (req.method.startsWith("pane.send")) f.sent.push(req.method);
       const result = req.method === "session.snapshot" ? { snapshot: { panes: f.closed ? [] : [pane], layouts: [] } } : { read: { text: "" } };
-      socket.end(`${JSON.stringify({ id: req.id, result })}\n`);
+      const hold = req.method === "session.snapshot" ? f.snapshot : undefined;
+      if (hold) f.snapshot = undefined;
+      if (hold) void hold().then(() => socket.end(`${JSON.stringify({ id: req.id, result })}\n`));
+      else socket.end(`${JSON.stringify({ id: req.id, result })}\n`);
     });
   });
   await new Promise<void>((resolve, reject) => { rpc.once("error", reject); rpc.listen(path, resolve); });
@@ -140,7 +155,7 @@ describe("OpenCode answer ordering", () => {
       await entered.promise;
       expect((await f.answer(first, { custom_text: "saved first" })).status).toBe(200);
       release.resolve();
-      await oldRead;
+      expect((await oldRead).steps?.[1]?.current).toBe(true);
       expect((await f.read()).steps?.[1]?.current).toBe(true);
     });
   });
@@ -185,14 +200,94 @@ describe("OpenCode answer ordering", () => {
   it("returns graceful fallback for malformed fields", async () => {
     await fixture(async (f) => {
       f.listing = async () => Response.json([{ ...f.forms[0], fields: [null] }]);
-      expect(await f.read()).toBeNull();
+      expect((await f.read()).fallback).toBe(true);
     });
   });
 
-  it("never offers terminal keystrokes when native forms are unavailable", async () => {
+  it.each(["empty", "permission", "missing", "error", "slow"] as const)("keeps the fallback card when native lookup is %s", async (kind) => {
     await fixture(async (f) => {
-      f.forms = [];
-      expect(await f.read()).toBeNull();
+      const release = deferred<Response>();
+      if (kind === "empty") f.forms = [];
+      if (kind === "permission") f.forms[0]!.metadata = { kind: "permission" };
+      if (kind === "missing") rmSync(f.serviceFile);
+      if (kind === "error") f.listing = async () => new Response(null, { status: 503 });
+      if (kind === "slow") f.listing = () => release.promise;
+      try { expect((await f.read()).fallback).toBe(true); }
+      finally { release.resolve(Response.json([])); }
+    });
+  });
+
+  it("does not let a newer poll reject a valid answer to the same form", async () => {
+    await fixture(async (f) => {
+      f.forms[0]!.fields.length = 1;
+      const prompt = await f.read();
+      const entered = deferred<void>();
+      const release = deferred<void>();
+      f.listing = async () => { entered.resolve(); await release.promise; return Response.json(f.forms); };
+      const answering = f.answer(prompt, { custom_text: "first" });
+      await entered.promise;
+      expect((await f.read()).id).toBe(prompt.id);
+      release.resolve();
+      expect((await answering).status).toBe(200);
+      expect(f.replies).toEqual([{ answer: { q0: "first" } }]);
+    });
+  });
+
+  it("keeps newer session progress when an old snapshot arrives late", async () => {
+    await fixture(async (f) => {
+      await f.read();
+      const entered = deferred<void>();
+      const release = deferred<void>();
+      f.snapshot = async () => { entered.resolve(); await release.promise; };
+      const oldRead = f.read();
+      await entered.promise;
+      f.session = "ses_fixture02";
+      f.forms[0]!.sessionID = f.session;
+      expect((await f.answer(await f.read(), { custom_text: "session B" })).status).toBe(200);
+      release.resolve();
+      await oldRead;
+      expect((await f.read()).steps?.[1]?.current).toBe(true);
+    });
+  });
+
+  it("does not return an empty card for a lookup superseded by another session", async () => {
+    await fixture(async (f) => {
+      await f.read();
+      const entered = deferred<void>();
+      const release = deferred<void>();
+      const oldForms = structuredClone(f.forms);
+      f.listing = async () => { entered.resolve(); await release.promise; return Response.json(oldForms); };
+      const oldRead = f.readResponse();
+      await entered.promise;
+      f.session = "ses_fixture02";
+      f.forms[0]!.sessionID = f.session;
+      const current = await f.read();
+      release.resolve();
+      const response = await oldRead;
+      expect(response.status).toBe(409);
+      expect((await f.read()).id).toBe(current.id);
+    });
+  });
+
+  it.each(["error", "slow", "missing"] as const)("keeps card identity and edits across transient %s", async (kind) => {
+    await fixture(async (f) => {
+      const prompt = await f.read();
+      const release = deferred<Response>();
+      if (kind === "error") f.listing = async () => new Response(null, { status: 503 });
+      if (kind === "slow") f.listing = () => release.promise;
+      if (kind === "missing") rmSync(f.serviceFile);
+      try {
+        expect((await f.read()).id).toBe(prompt.id);
+        if (kind !== "missing") expect((await f.read()).id).toBe(prompt.id);
+      } finally { release.resolve(Response.json(f.forms)); }
+    });
+  });
+
+  it("submits multiselect checks and custom text together", async () => {
+    await fixture(async (f) => {
+      f.forms[0]!.fields = [{ key: "q0", type: "multiselect", custom: true, options: [{ value: "a", label: "A" }] }];
+      expect((await f.answer(await f.read(), { option_indices: [0], custom_text: "own" })).status).toBe(200);
+      expect(f.replies).toEqual([{ answer: { q0: ["a", "own"] } }]);
     });
   });
 
@@ -223,7 +318,7 @@ describe("OpenCode answer ordering", () => {
     });
   });
 
-  it("rejects a final response if the session changed while posting", async () => {
+  it.each(["session", "working", "settled"] as const)("acknowledges a delivered answer despite concurrent %s", async (change) => {
     await fixture(async (f) => {
       f.forms[0]!.fields.length = 1;
       const entered = deferred<void>();
@@ -231,11 +326,27 @@ describe("OpenCode answer ordering", () => {
       f.replying = async () => { entered.resolve(); await release.promise; return new Response(null, { status: 204 }); };
       const answering = f.answer(await f.read(), { custom_text: "first" });
       await entered.promise;
-      f.session = "ses_fixture02";
+      if (change === "session") f.session = "ses_fixture02";
+      if (change === "working") f.working();
+      if (change === "settled") { f.forms = []; await f.read(); }
       release.resolve();
-      expect((await answering).status).toBe(409);
+      expect((await answering).status).toBe(200);
+      expect(f.replies).toEqual([{ answer: { q0: "first" } }]);
     });
   });
+
+  it("reports an unknown delivery rather than failure when the native reply times out", async () => {
+    await fixture(async (f) => {
+      f.forms[0]!.fields.length = 1;
+      const release = deferred<Response>();
+      f.replying = () => release.promise;
+      try {
+        const response = await f.answer(await f.read(), { custom_text: "accepted upstream" });
+        expect((await response.json() as { error: { code: string } }).error.code).toBe("reply_unconfirmed");
+        expect(f.replies).toEqual([{ answer: { q0: "accepted upstream" } }]);
+      } finally { release.resolve(new Response(null, { status: 204 })); }
+    });
+  }, 3_000);
 
   it("bounds an unresponsive service lookup without waiting for a reply", async () => {
     await fixture(async (f) => {
@@ -244,7 +355,7 @@ describe("OpenCode answer ordering", () => {
       f.listing = () => release.promise;
       const start = performance.now();
       try {
-        expect((await f.answer(prompt, { custom_text: "first" })).status).toBe(409);
+        expect((await f.answer(prompt, { custom_text: "first" })).status).toBe(502);
         expect(performance.now() - start).toBeLessThan(2_500);
         expect(f.replies).toEqual([]);
       } finally { release.resolve(Response.json(f.forms)); }

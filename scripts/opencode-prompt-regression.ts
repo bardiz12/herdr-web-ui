@@ -33,6 +33,7 @@ try {
         return Response.json({ prompt: window.nativePrompt, suggestion: null });
       if (url.pathname === "/api/pane/prompt/answer") {
         window.nativeAnswers.push(JSON.parse(init.body));
+        if (window.nativeUnconfirmed) return Response.json({ error: { code: "reply_unconfirmed", message: "fixture_delivery_unconfirmed" } }, { status: 504 });
         window.nativePrompt = null;
         return Response.json({ ok: true });
       }
@@ -83,6 +84,20 @@ try {
         assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
         assert.deepEqual(errors, []);
         if (shots) await page.screenshot({ path: join(shots, `${width}-${theme}-${navigation}-restored.png`) });
+        const sent = page.waitForFunction(() => (window as unknown as { nativeAnswers: unknown[] }).nativeAnswers.length === 2);
+        await page.locator(navigation === "back" ? ".prompt-card-submit" : ".prompt-card-custom button").click();
+        await sent;
+        const combined = await page.evaluate(() => (window as unknown as { nativeAnswers: { option_indices?: number[]; custom_text?: string }[] }).nativeAnswers[1]);
+        assert.deepEqual(combined?.option_indices, [0], "both submission actions keep checked options");
+        assert.equal(combined?.custom_text, "A custom tool", "both submission actions keep custom text");
+        await page.locator(".prompt-card").waitFor({ state: "hidden" });
+        await page.evaluate((next) => {
+          Object.assign(window, { nativeUnconfirmed: true, nativePrompt: { ...next, id: "native-unconfirmed", default_option_indices: [0], default_custom_text: "A custom tool" } });
+        }, prompt);
+        await page.locator(".prompt-card").waitFor();
+        await page.locator(".prompt-card-submit").click();
+        await page.locator(".prompt-card-error").waitFor();
+        assert.equal(await page.locator(".prompt-card-error").textContent(), "fixture_delivery_unconfirmed", "show the uncertain-delivery advice instead of inviting a blind retry");
         console.log(`PASS ${width} ${theme} ${navigation}: drafts survive navigation and remount`);
       } finally { await context.close(); }
     }
