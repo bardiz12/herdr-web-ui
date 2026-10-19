@@ -333,6 +333,14 @@ export function createServer(
         return jsonResponse({ error: { code: "read_only", message: "this device can only watch" } }, 403);
       }
 
+      // API reads can chain several bounded 10 s Herdr RPCs. Give the handler time to return
+      // its JSON result or timeout instead of Bun closing the socket at its default 10 s idle
+      // cutoff. Static files keep their default; streaming and long-operation routes override
+      // this finite budget below, after access and origin checks have passed. Only a signed-in
+      // request gets it: the routes open without sign-in (health, auth, pairing) keep the default,
+      // so an unauthenticated client cannot hold idle sockets for a minute.
+      if (pathname.startsWith("/api/") && authenticated) bunServer.timeout(request, 60);
+
       if (pathname === "/api/bridge") {
         if (token === "" && !bridgeAuthorized) return unauthorizedJson();
         try { return jsonResponse(await bridgeIdentity(sidecar)); } catch (error) { return errorResponse(error); }
@@ -354,9 +362,6 @@ export function createServer(
           return response;
         }
       }
-      // Chat reads can chain several valid 10 s RPCs. Leave the 15/30 s client deadline
-      // in charge rather than Bun's default 10 s idle cutoff. PC proxies have their own budget above.
-      if (pathname === "/api/pane/read" || pathname === "/api/pane/conversation") bunServer.timeout(request, 60);
       if (pathname === "/ws") {
         if (!sameOrigin(request)) return new Response("invalid origin", { status: 403 });
         const deviceId = access.level === "full" ? access.device?.id : undefined;

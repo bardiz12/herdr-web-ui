@@ -758,6 +758,12 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   from that same difference, as the palette's filter chips do.
 - The header's Chat/Terminal switch from `769px` drops the track and the glyphs: two words, the
   chosen one on the hover fill. At `<=768px` it keeps the track; at `<=560px` it is glyphs only.
+  On a phone (`<=768px`) its options draw `34px` tall in a `40px` track, clear of the header's rule
+  in either density (the compact bar is `46px`), and reach `--touch-target-header` through the same
+  invisible `::before` expander; a glyph sits in the middle of its `--touch-target-header`-wide
+  option. This follows iOS's segmented control in a navigation bar (UIKit draws it about `32pt`
+  in a `44pt` bar and takes taps beyond its drawn edge); the Codex and Claude phone apps have no
+  view switch in their bar to follow.
 
 ### Keyboard hint (`.kbd`)
 - An inline mono keycap: `18px` high, strong bottom edge, `--radius-sm`, `--fs-2xs`.
@@ -1026,6 +1032,11 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   caret and shows on hover, focus, while its panel is open, while the PC is not connected, and always
   on touch. Connected is the dot alone; every other state is also written under the name, with the server's
   error clamped to two lines and complete in the tooltip.
+- SSH PC management stays inline: its rename form and action buttons reflow within the sidebar
+  instead of floating over it. Shrinkable grid tracks and wrapping button labels keep controls
+  contained at narrow widths, with touch-sized buttons on coarse pointers. This follows the
+  width-constrained responsive sidebar in [T3 Code](https://github.com/pingdotgg/t3code/blob/main/apps/web/src/components/ui/sidebar.tsx)
+  but keeps herdr's existing inline panel instead of adopting its mobile sheet; no code is borrowed.
 - A repository's worktree workspaces (`workspace.worktree.is_linked_worktree`)
   sit indented under the row of the workspace on its main checkout (`.worktree-children`), without
   a tree hairline; a worktree whose repository workspace is not open stays at the top level.
@@ -1299,6 +1310,11 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   first copy drops its own left inset so its glyph stays on the prose edge (an overhang past the
   transcript's edge cannot be tapped). With a mouse the copy and format buttons keep their `--chip-h`
   look and take a `--pointer-target` hit area through an invisible `::before` expander.
+- Selecting text in chat copies the browser's rendered selection as plain text, not reconstructed
+  Markdown. Safe rich HTML accompanies it for formatted paste; the explicit MD and TXT actions
+  still copy the whole answer. This follows ordinary browser selection and the Claude/ChatGPT
+  distinction between selecting text and copying an answer, rather than T3 Code's Markdown-first
+  selection behavior. No extra setting is needed.
 - Markdown supports headings, lists (a task item `- [x]` / `- [ ]` shows a checked or empty box in
   place of its bullet, not clickable), links, quotes, tables, inline/fenced code and code-copy
   actions.

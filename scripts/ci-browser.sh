@@ -97,6 +97,7 @@ run_script scripts/composer-fit-demo-regression.ts
 run_script scripts/held-rows-demo-regression.ts
 run_script scripts/sidebar-activity-demo-regression.ts
 run_script scripts/sidebar-spacing-demo-regression.ts
+run_script scripts/sidebar-machine-layout-demo-regression.ts
 run_script scripts/sidebar-branch-line-demo-regression.ts
 run_script scripts/sidebar-tokens-demo-regression.ts
 run_script scripts/workspace-touch-reorder-demo-regression.ts
