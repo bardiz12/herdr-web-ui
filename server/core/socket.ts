@@ -5,6 +5,7 @@
  */
 import type { ServerWebSocket, WebSocketHandler } from "bun";
 import type { ClientMessage, ClientRole, ServerFeature, SessionSnapshot } from "../../shared/protocol.ts";
+import { ConnectionDiagnostics } from "../connection-diagnostics.ts";
 import { HerdrError } from "../herdr/client.ts";
 import { OUTPUT_HARD_BYTES } from "../output-window.ts";
 import { type Client, connectionOf, presenceOf, send, type SocketData } from "./connections.ts";
@@ -37,6 +38,7 @@ export function createSocket({ clients, present, stopped, admit, setRole, watchP
   /** every other frame type's handler, from the module that owns what it changes */
   frames: Omit<FrameHandlers, ConnectionFrame>;
 }): WebSocketHandler<SocketData> {
+  const websocketDiagnostics = new ConnectionDiagnostics("websocket");
   // Here and not in connections.ts: watch checks its grid with validGeometry (terminals.ts), and
   // terminals.ts imports connections.ts, which imports none of the core.
   const connectionFrames = {
@@ -137,7 +139,11 @@ export function createSocket({ clients, present, stopped, admit, setRole, watchP
       }
     },
 
-    close(client) {
+    close(client, code) {
+      if (!stopped() && code !== 1000 && code !== 1001) {
+        const operation = client.data.relay ? "remote" : "local";
+        websocketDiagnostics.failed(operation, "closed", { operation, close_code: code });
+      }
       end(client, "closed");
     },
   };

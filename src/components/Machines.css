@@ -221,6 +221,17 @@
   }
 }
 
+.machine-controls .btn-danger:disabled {
+  opacity: 0.85;
+}
+
+@media (hover: hover) {
+  .machine-controls .btn-danger:hover:not(:disabled) {
+    background: var(--danger-tint);
+    border-color: var(--status-blocked);
+  }
+}
+
 .machine-dialog {
   width: min(560px, calc(100vw - 24px));
   max-height: calc(100dvh - 24px);

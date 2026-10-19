@@ -9,7 +9,8 @@ import type { ServerMessage, SessionSnapshot, HerdrPane } from "../shared/protoc
 import type { PushService } from "./push.ts";
 import { alertStatus } from "../shared/notify-policy.ts";
 import type { BridgeDescriptor } from "./bridge.ts";
-import { sessionSnapshot } from "./herdr/client.ts";
+import { HerdrError, sessionSnapshot } from "./herdr/client.ts";
+import { ConnectionDiagnostics, transportFailureCode } from "./connection-diagnostics.ts";
 import { labelOmoPanes } from "./conversation.ts";
 import type { CompletionTracker } from "./completion.ts";
 import { HerdrProfileState, herdrMachineId } from "./herdr-profile-state.ts";
@@ -156,6 +157,8 @@ export class MachineManager {
   private statePath: string;
   private sshDir: string;
   private local: Machine = { id: LOCAL_MACHINE, name: hostname(), kind: "local", enabled: true, state: "connecting", error: null, snapshot: null };
+  private localDiagnostics = new ConnectionDiagnostics("machine.local");
+  private remoteDiagnostics = new ConnectionDiagnostics("machine.remote");
   private discoveryTimer?: ReturnType<typeof setTimeout>;
   private discoveryStarted = false;
   private settingsPath: string;
@@ -338,17 +341,21 @@ export class MachineManager {
       do {
         this.localRefreshQueued = false;
         const revision = this.localRevision;
+        const started = performance.now();
         try {
           const snapshot = await this.readLocal();
           if (this.stopped) break;
           // A newer event already patched the roster. Never publish this older load.
           if (revision !== this.localRevision) { this.localRefreshQueued = true; continue; }
+          this.localDiagnostics.recovered(LOCAL_MACHINE, { operation: "snapshot", elapsed_ms: performance.now() - started });
           this.local.snapshot = snapshot; this.local.state = "connected"; this.local.error = null;
           // a pane the roster no longer lists is gone: the same id later is a pane heard of anew
           this.heardAgents.keepOnly(snapshot.panes);
         } catch (e) {
           if (this.stopped) break;
           if (revision !== this.localRevision) { this.localRefreshQueued = true; continue; }
+          const code = e instanceof HerdrError ? transportFailureCode(e.code) : null;
+          this.localDiagnostics.failed(LOCAL_MACHINE, code ?? "refresh_failed", { operation: "snapshot", elapsed_ms: performance.now() - started });
           this.local.state = "error"; this.local.error = String(e instanceof Error ? e.message : e);
         }
         this.emit();
@@ -460,6 +467,9 @@ export class MachineManager {
         this.emit();
       } catch (e) {
         const ownsRuntime = runtime.generation === generation;
+        if (ownsRuntime && !this.stopped && !job.abort.signal.aborted && job.public.phase !== "cancelled") {
+          this.remoteDiagnostics.failed(machineId, e instanceof MachineActionRequired ? "action_required" : "connection_lost", { operation: "bridge", machine_id: machineId });
+        }
         const error = e instanceof Error ? e.message : String(e);
         // an update of a registered PC that could not reach it (switched off, asleep, off the
         // network, or gone in the middle) learned nothing about its bridge: the PC waits as
@@ -745,7 +755,11 @@ export class MachineManager {
     const endpoint = runtime.endpoint!;
     const ws = authenticatedWebSocket(endpoint.url.replace("http:", "ws:") + "/ws", endpoint.token);
     runtime.observer = ws;
-    ws.onopen = () => ws.send(JSON.stringify({ type: "role", mode: "observe" }));
+    ws.onopen = () => {
+      if (generation !== runtime.generation || this.stopped) return;
+      this.remoteDiagnostics.recovered(runtime.machine.id, { operation: "bridge", machine_id: runtime.machine.id });
+      ws.send(JSON.stringify({ type: "role", mode: "observe" }));
+    };
     ws.onmessage = (event) => {
       if (generation !== runtime.generation || this.stopped) return;
       let message: ServerMessage;
@@ -769,6 +783,7 @@ export class MachineManager {
   }
   private lost(runtime: Runtime, generation: number, error: unknown): void {
     if (generation !== runtime.generation || !runtime.machine.enabled || this.stopped) return;
+    this.remoteDiagnostics.failed(runtime.machine.id, error instanceof MachineActionRequired ? "action_required" : "connection_lost", { operation: "bridge", machine_id: runtime.machine.id });
     this.disconnect(runtime);
     runtime.machine.error = error instanceof Error ? error.message : String(error);
     if (error instanceof MachineActionRequired) {

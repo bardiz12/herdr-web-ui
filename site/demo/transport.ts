@@ -529,6 +529,8 @@ async function route(url: URL, method: string, init: RequestInit | undefined, in
   if (path === "/api/updates/installed") return json({ revision: null, version: null, previous_version: null, installed_at: null, releases: [], omitted: 0 }, 200, { "cache-control": "no-store" });
   // the demo has no herdr to update: the controls stay hidden
   // the demo sends no counts: a server without telemetry answers 404, and the app shows neither its notice nor its switch
+  // Connection breadcrumbs stay inside the fictional demo; never send them to a real endpoint.
+  if (path === "/api/connection-diagnostics") return new Response(null, { status: 204 });
   if (path === "/api/telemetry") return json({ error: { code: "not_found", message: "This server sends no telemetry" } }, 404, { "cache-control": "no-store" });
   if (path === "/api/herdr/update") return json({ supported: false, phase: "idle", server_version: null, binary_version: null, stale: false, output: null, finished_at: null }, 200, { "cache-control": "no-store" });
   // the demo opens no public address: the Portal section stays hidden

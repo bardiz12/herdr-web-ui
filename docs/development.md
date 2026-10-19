@@ -12,6 +12,23 @@ bun run dev      # Vite on :5173, proxies /api and /ws
 
 `bun run server` and `bun run dev` never update themselves; only `bun run start` and the plugin run the update supervisor.
 
+## Connection diagnostics
+
+Transport failures write one JSON line to the server's standard error, with an ISO timestamp,
+an opaque failure-episode ID and a fixed event name (`herdr.rpc.failed`, `machine.local.failed`,
+`machine.remote.failed` or `websocket.failed`). RPC records include the method, request ID,
+elapsed time, connection time when known, deadline and other in-flight request count. Compare the
+request ID with Herdr's own log; a timeout alone does not identify which process stalled.
+
+A later successful RPC or machine connection writes one `.recovered` line. Repeated failures are
+summarized at most once every 30 seconds per RPC method/peer or machine, with suppressed counts;
+bookkeeping retains at most 128 recent keys per logger, including healthy keys so flapping cannot
+reset the throttle. Only a visible failure episode emits a recovery. Abnormal browser WebSocket closes are
+coalesced separately for local and relayed connections; normal closes and server shutdown are quiet.
+The close reason, input, credentials, peer names, socket paths and raw exception messages are never
+included. A remote machine's opaque UUID may appear, not its name or SSH address. These records are
+not a per-request HTTP access log and do not add timestamps to older console messages.
+
 ## Checks
 
 Production builds create Brotli (`.br`) and gzip (`.gz`) sidecars for JavaScript and CSS under
@@ -218,6 +235,29 @@ its argv is added to `isOmoProcess`. A custom launcher must therefore set the st
 the child's environment before `exec` (`OMO_CODING_AGENT_DIR=… my-launcher`): a
 variable the process sets only in-process later may never appear in
 `/proc/<pid>/environ`, which reports the environment the kernel recorded at `exec`.
+
+## Browser connection diagnostics
+
+The browser keeps at most 32 recent connection breadcrumbs plus one pinned 16-record incident
+report in memory, so healthy traffic cannot erase the trigger before upload. A missed heartbeat, close/error,
+pagehide, stuck-closing socket, held input or unanswered send can send the latest 16 records to
+`POST /api/connection-diagnostics` on this app's own origin. Healthy traffic does not generate an
+access log. An opaque, per-connection-object ID and connection epoch correlate lifecycle events,
+visibility/online flags, socket states, probe timing, pending counts and numeric receipt IDs.
+The browser's online flag is not proof of network reachability; reports are marked client-reported.
+
+Reports never include message/secret text, payloads, terminal output, close reasons, URLs,
+credentials or PC names. They are unrelated to anonymous install/update telemetry and never leave
+this server. Browser storage is not used. Reports are best effort: a failed HTTP attempt retains
+bounded metadata for a later connection event, but a full app/page restart can lose unsent records.
+The HTTP attempt is bounded to five seconds and uses same-origin credentials, no redirects and
+keepalive for pagehide. Explicit disposal stops new reports; no user input is retained or retried.
+
+The authenticated, same-origin endpoint accepts watch-device reports, but no terminal input.
+It revalidates and normalizes every field, accepts at most 16 events and 8192 bytes, and limits one
+peer to four reports/minute and the whole server to 16/minute with 128 peer buckets. A valid report
+writes one `client.connection_trace` JSON line to stderr. Old/locked endpoints disable reporting;
+rate limits back it off without affecting the socket or composer. The demo consumes reports locally.
 
 ## Conversation refresh
 

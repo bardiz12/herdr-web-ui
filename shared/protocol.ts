@@ -76,6 +76,9 @@ export type { Machine, MachineEvent, PaneTarget, SetupJob, SetupRequest, SetupAc
  *  POST   /api/updates/install           -> 202 { accepted: true }
  *         Update POSTs require X-Herdr-Update: 1, same-origin browser requests,
  *         and the usual token gate. Managed starts only; status is polled during restart.
+ *  POST   /api/connection-diagnostics    -> 204; ClientConnectionTrace, metadata only, same-origin
+ *         and authenticated (watch devices included). 400 invalid_trace, 413 trace_too_large,
+ *         429 trace_rate_limited. At most 16 events and 8192 bytes; never input or credentials.
  *  GET    /api/telemetry                 -> TelemetryStatus (shared/telemetry.ts), no-store
  *  POST   /api/telemetry                 -> TelemetryStatus; TelemetryChange (shared/telemetry.ts):
  *         { enabled?, notice_seen?: true, notice_version?, settings? }. A notice acknowledgement
@@ -1237,6 +1240,32 @@ export type ClientMessage =
    * and drops a socket that stays silent: a half-open one still reads OPEN in the browser. A remote
    * PC's socket relays it unchanged, so the remote server's snapshot decides whether it is sent. */
   | { type: "ping"; id: number };
+
+/** Local-only diagnostic metadata. This contract never contains a message, URL or credential. */
+export type ClientConnectionEventKind = "connect" | "open" | "connect_timeout" | "close" | "socket_error"
+  | "pagehide" | "pageshow" | "hidden" | "visible" | "online" | "probe" | "probe_retry"
+  | "probe_overdue" | "probe_drop" | "pong" | "submit_sent" | "submit_result" | "submit_timeout"
+  | "submit_disconnect" | "input_held" | "probe_input_blocked" | "closing_wait";
+export interface ClientConnectionEvent {
+  seq: number;
+  at: number;
+  connection: number;
+  kind: ClientConnectionEventKind;
+  socket_state: number | null;
+  visibility: "visible" | "hidden" | "unknown";
+  online: boolean | null;
+  code?: number;
+  elapsed_ms?: number;
+  pending?: number;
+  request_id?: number;
+  attempt?: number;
+  result?: "ok" | "refused";
+}
+export interface ClientConnectionTrace {
+  client_id: string;
+  target: "local" | "remote";
+  events: ClientConnectionEvent[];
+}
 
 /** What a server supports beyond the base protocol, listed in its first snapshot; older bridges list nothing. */
 export type ServerFeature = "submit" | "pending-input" | "pending-hold" | "secret-input" | "input-ready" | "take-over" | "watch" | "conversation-watch" | "ping";

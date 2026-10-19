@@ -35,7 +35,12 @@ Messages say only what the person needs now, not everything the app knows:
   apply. A known cause is the sentence ("PC disk is full"); a generic fallback never pushes it aside.
 - One situation, one message, one place.
 - The resting screen is calm: a destructive control looks neutral until it asks to confirm;
-  danger color is for the moment of risk.
+  danger color is for the moment of risk. PC removal is the exception: its red tint and border
+  stay visible before and after the first click arms the second, so the destructive consequence is
+  clear before confirmation. T3 Code's [outlined destructive button](https://github.com/pingdotgg/t3code/blob/main/apps/web/src/components/ui/button.tsx)
+  is a reference for restrained destructive treatment and focus feedback; this uses herdr's
+  existing danger tokens and borrows no code. A pending PC removal is only lightly dimmed so
+  its warning text and border stay readable in both light and dark themes.
 
 ## 2. Color
 
