@@ -13,6 +13,42 @@ import {
 } from "./opencode-service.ts";
 
 describe("opencode-service", () => {
+  it("sends native credentials and answers directly despite proxy environment variables", async () => {
+    const direct: string[] = [];
+    const proxied: string[] = [];
+    const service = Bun.serve({
+      port: 0, hostname: "127.0.0.1",
+      fetch(request) {
+        direct.push(request.method);
+        return request.method === "GET" ? Response.json([]) : new Response(null, { status: 204 });
+      },
+    });
+    const proxy = Bun.serve({
+      port: 0, hostname: "127.0.0.1",
+      fetch(request) {
+        proxied.push(new URL(request.url).pathname);
+        return request.method === "GET" ? Response.json([]) : new Response(null, { status: 204 });
+      },
+    });
+    try {
+      const config = { baseUrl: service.url.origin, port: service.port, pid: process.pid, password: "fixture-secret" };
+      const child = Bun.spawn([process.execPath, "-e", `
+        import { listPendingQuestionForms, replyOpenCodeForm } from ${JSON.stringify(import.meta.dir + "/opencode-service.ts")};
+        const config = ${JSON.stringify(config)};
+        await fetch(config.baseUrl + "/control");
+        console.log(JSON.stringify([await listPendingQuestionForms(config, "session"), await replyOpenCodeForm(config, "session", "form", {q0:"fixture-answer"})]));
+      `], {
+        env: { ...process.env, http_proxy: proxy.url.origin, HTTP_PROXY: proxy.url.origin, https_proxy: proxy.url.origin, HTTPS_PROXY: proxy.url.origin, ALL_PROXY: proxy.url.origin, all_proxy: proxy.url.origin, NO_PROXY: "", no_proxy: "" },
+        stdout: "pipe", stderr: "pipe", timeout: 4_000,
+      });
+      const [output, error, code] = await Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]);
+      expect(error).toBe("");
+      expect(code).toBe(0);
+      expect(JSON.parse(output)).toEqual([[], { ok: true, status: 204 }]);
+      expect(proxied).toEqual(["/control"]);
+      expect(direct).toEqual(["GET", "POST"]);
+    } finally { service.stop(true); proxy.stop(true); }
+  });
   it.each(["https://127.0.0.1:4000", "http://example.com:4000", "file:///tmp/service", "not a URL"])("rejects untrusted service URL %s even with a port", (url) => {
     const tmp = mkdtempSync(join(tmpdir(), "opencode-service-test-"));
     try {

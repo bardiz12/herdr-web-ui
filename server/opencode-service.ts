@@ -97,11 +97,13 @@ export async function listPendingQuestionForms(
 ): Promise<OpenCodeFormInfo[] | null> {
   try {
     const url = `${config.baseUrl}/api/session/${encodeURIComponent(sessionID)}/form`;
-    const response = await fetchFn(url, {
+    const request: RequestInit & { proxy: false } = {
       headers: { Authorization: opencodeAuthHeader(config.password) },
       redirect: "error",
+      proxy: false,
       signal: AbortSignal.any([AbortSignal.timeout(OPENCODE_HTTP_TIMEOUT_MS), ...(signal ? [signal] : [])]),
-    });
+    };
+    const response = await fetchFn(url, request);
     if (!response.ok) return null;
     const body = (await response.json()) as unknown;
     const items = Array.isArray(body)
@@ -145,7 +147,7 @@ export async function replyOpenCodeForm(
 ): Promise<{ ok: boolean; status: number }> {
   try {
     const url = `${config.baseUrl}/api/session/${encodeURIComponent(sessionID)}/form/${encodeURIComponent(formID)}/reply`;
-    const response = await fetchFn(url, {
+    const request: RequestInit & { proxy: false } = {
       method: "POST",
       headers: {
         Authorization: opencodeAuthHeader(config.password),
@@ -153,8 +155,10 @@ export async function replyOpenCodeForm(
       },
       body: JSON.stringify({ answer: answers }),
       redirect: "error",
+      proxy: false,
       signal: AbortSignal.any([AbortSignal.timeout(OPENCODE_HTTP_TIMEOUT_MS), ...(signal ? [signal] : [])]),
-    });
+    };
+    const response = await fetchFn(url, request);
     return { ok: response.status === 200 || response.status === 204, status: response.status };
   } catch {
     return { ok: false, status: 0 };
