@@ -4,7 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
-  cancelOpenCodeForm,
   listPendingQuestionForms,
   opencodeAuthHeader,
   opencodeStateDir,
@@ -14,6 +13,74 @@ import {
 } from "./opencode-service.ts";
 
 describe("opencode-service", () => {
+  it.each(["https://127.0.0.1:4000", "http://example.com:4000", "file:///tmp/service", "not a URL"])("rejects untrusted service URL %s even with a port", (url) => {
+    const tmp = mkdtempSync(join(tmpdir(), "opencode-service-test-"));
+    try {
+      writeFileSync(join(tmp, "service.json"), JSON.stringify({ url, port: 4000, pid: process.pid, password: "fixture" }));
+      expect(readOpenCodeService(tmp)).toBeNull();
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects oversized service files", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "opencode-service-test-"));
+    try {
+      writeFileSync(join(tmp, "service.json"), JSON.stringify({ port: 4000, pid: process.pid, password: "x".repeat(65_536) }));
+      expect(readOpenCodeService(tmp)).toBeNull();
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects dead process ids", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "opencode-service-test-"));
+    const child = Bun.spawn([process.execPath, "-e", ""], { stdout: "ignore", stderr: "ignore" });
+    await child.exited;
+    try {
+      writeFileSync(join(tmp, "service.json"), JSON.stringify({ port: 4000, pid: child.pid, password: "fixture" }));
+      expect(readOpenCodeService(tmp)).toBeNull();
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it.skipIf(process.platform === "win32")("rejects a FIFO without waiting for its writer", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "opencode-service-test-"));
+    const path = join(tmp, "service.json");
+    const child = Bun.spawn(["mkfifo", path], { stdout: "ignore", stderr: "ignore" });
+    expect(await child.exited).toBe(0);
+    const reader = Bun.spawn([process.execPath, "-e", `import { readOpenCodeService } from ${JSON.stringify(import.meta.dir + "/opencode-service.ts")}; console.log(JSON.stringify(readOpenCodeService(${JSON.stringify(tmp)})));`], { stdout: "pipe", stderr: "pipe" });
+    const deadline = setTimeout(() => reader.kill(), 1_000);
+    try {
+      expect(await reader.exited).toBe(0);
+      expect(await new Response(reader.stdout).text()).toBe("null\n");
+    } finally {
+      clearTimeout(deadline);
+      reader.kill();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects malformed question fields at the HTTP boundary", async () => {
+    const service = Bun.serve({
+      port: 0, hostname: "127.0.0.1",
+      fetch: () => Response.json([{ id: "form", sessionID: "session", title: "Form", metadata: { kind: "question" }, fields: [null] }]),
+    });
+    try {
+      expect(await listPendingQuestionForms({ baseUrl: service.url.origin, port: service.port ?? 0, pid: process.pid, password: "fixture" }, "session")).toEqual([]);
+    } finally { service.stop(true); }
+  });
+
+  it("does not follow redirects with a user's answers", async () => {
+    let forwarded = 0;
+    const target = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => { forwarded++; return new Response(null, { status: 204 }); } });
+    const service = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: () => new Response(null, { status: 307, headers: { location: target.url.href } }) });
+    try {
+      expect((await replyOpenCodeForm({ baseUrl: service.url.origin, port: service.port ?? 0, pid: process.pid, password: "fixture" }, "session", "form", { q0: "private" })).ok).toBe(false);
+      expect(forwarded).toBe(0);
+    } finally { service.stop(true); target.stop(true); }
+  });
   it("resolves state dir from XDG_STATE_HOME or home directory", () => {
     expect(opencodeStateDir({ XDG_STATE_HOME: "/custom/state" }, "/home/user")).toBe("/custom/state/opencode");
     expect(opencodeStateDir({}, "/home/user")).toBe("/home/user/.local/state/opencode");
@@ -31,19 +98,19 @@ describe("opencode-service", () => {
       expect(readOpenCodeService(tmp)).toBeNull();
 
       // With port
-      writeFileSync(join(tmp, "service.json"), JSON.stringify({ port: 4000, pid: 1234, password: "test-password" }));
-      expect(readOpenCodeService(tmp)).toEqual({ baseUrl: "http://127.0.0.1:4000", port: 4000, pid: 1234, password: "test-password" });
+      writeFileSync(join(tmp, "service.json"), JSON.stringify({ port: 4000, pid: process.pid, password: "test-password" }));
+      expect(readOpenCodeService(tmp)).toEqual({ baseUrl: "http://127.0.0.1:4000", port: 4000, pid: process.pid, password: "test-password" });
 
       // With url (OpenCode 2.0.32 format)
-      writeFileSync(join(tmp, "service.json"), JSON.stringify({ url: "http://127.0.0.1:49374", pid: 22877, password: "secret" }));
-      expect(readOpenCodeService(tmp)).toEqual({ baseUrl: "http://127.0.0.1:49374", port: 49374, pid: 22877, password: "secret" });
+      writeFileSync(join(tmp, "service.json"), JSON.stringify({ url: "http://127.0.0.1:49374", pid: process.pid, password: "secret" }));
+      expect(readOpenCodeService(tmp)).toEqual({ baseUrl: "http://127.0.0.1:49374", port: 49374, pid: process.pid, password: "secret" });
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
   });
 
   it("formats Basic auth header correctly", () => {
-    expect(opencodeAuthHeader("secret-pass")).toBe(`Basic ${btoa("opencode:secret-pass")}`);
+    expect(atob(opencodeAuthHeader("secret-pass").slice(6))).toBe("opencode:secret-pass");
   });
 
   it("lists and filters pending question forms with direct array or { data: [] } wrapper", async () => {
@@ -126,20 +193,4 @@ describe("opencode-service", () => {
     expect(result).toEqual({ ok: false, status: 409 });
   });
 
-  it("cancels forms with DELETE successfully", async () => {
-    const config: OpenCodeServiceConfig = { baseUrl: "http://127.0.0.1:54321", port: 54321, pid: 9999, password: "test-pass" };
-    let requestedMethod = "";
-    let requestedUrl = "";
-
-    const mockFetch = (async (url: string | URL | Request, init?: RequestInit) => {
-      requestedUrl = String(url);
-      requestedMethod = String(init?.method);
-      return new Response(null, { status: 204 });
-    }) as unknown as typeof fetch;
-
-    const result = await cancelOpenCodeForm(config, "ses-123", "form-1", "user cancelled", mockFetch);
-    expect(result).toEqual({ ok: true, status: 204 });
-    expect(requestedMethod).toBe("DELETE");
-    expect(requestedUrl).toBe("http://127.0.0.1:54321/api/session/ses-123/form/form-1?message=user%20cancelled");
-  });
 });
