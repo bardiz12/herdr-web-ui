@@ -397,6 +397,9 @@ export function startStatusCollector(handlers: StatusCollectorHandlers, override
         // ended during the loss is still to be settled, or it would read as going on for good
         const newer = new Set([...lastEventOf, ...actedOn].filter(([, seq]) => seq > askedAt).map(([paneId]) => paneId));
         handlers.onResync?.(snapshot.panes, newer);
+        // clients read the panes again below, so what they will show is this snapshot's line: the
+        // next event is measured against it, not against one heard before the loss
+        for (const pane of snapshot.panes) if (!newer.has(pane.pane_id)) displayAgents.set(pane.pane_id, pane.display_agent ?? null);
         // clients learn statuses from events, and some were lost: they fetch again
         handlers.onStructureChange();
       }

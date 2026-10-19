@@ -31,7 +31,7 @@ export interface PaneTokenSpec {
   rules?: PaneTokenRule[];
 }
 
-/** The `$name` tokens of herdr's `[ui.sidebar.agents]`, each once, in the order its rows name them. */
+/** The `$name` tokens of herdr's `[ui.sidebar.agents]`, in the order its rows name them; a token named in two places is listed at each. */
 export interface AgentRowTokens {
   /** from `rows`; null when the config sets none (herdr's default rows name no token), and a row then draws every token */
   rows: PaneTokenSpec[] | null;
@@ -65,8 +65,9 @@ export function paneTokenRuleMatches(rule: PaneTokenRule, value: string): boolea
 /**
  * What a pane's tokens say on its agent row, in the order the row draws them: the tokens the
  * agent's herdr rows name, or every token (by name) where the config names none. A missing or
- * blank token says nothing, and neither does one a matching rule hides. The values are text the
- * row writes as it is, never markup.
+ * blank token says nothing, and neither does one a matching rule hides. A token the rows name twice
+ * is said once, at the first place whose rules leave it shown. The values are text the row writes as
+ * it is, never markup.
  */
 export function paneTokenValues(layout: AgentRowTokens | null, agent: string | null, tokens: Readonly<Record<string, unknown>> | null | undefined): string[] {
   if (!tokens) return [];
@@ -77,12 +78,12 @@ export function paneTokenValues(layout: AgentRowTokens | null, agent: string | n
   const specs = (layout && agent !== null && Object.hasOwn(layout.by_agent, agent) ? layout.by_agent[agent] : undefined) ?? layout?.rows ?? null;
   if (specs === null) return Object.keys(tokens).sort().flatMap((name) => valueOf(name)?.trim() ?? []);
   const shown: string[] = [];
-  const seen = new Set<string>();
+  const said = new Set<string>();
   for (const { name, rules } of specs) {
-    if (seen.has(name)) continue;
-    seen.add(name);
+    if (said.has(name)) continue;
     const value = valueOf(name);
     if (value === null || rules?.find((rule) => paneTokenRuleMatches(rule, value))?.hide) continue;
+    said.add(name);
     shown.push(value.trim());
   }
   return shown;

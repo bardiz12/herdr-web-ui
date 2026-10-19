@@ -44,9 +44,10 @@ to change. Also read [server/AGENTS.md](server/AGENTS.md) and [src/AGENTS.md](sr
   loopback.
 - Mac and iOS Simulator checks run on the maintainer's test MacBook Air, `ssh eamac`, which stays
   awake for it. Never drive the MacBook Pro (`ssh macbook`, `ssh mymac`): it is the maintainer's
-  working machine, and automation there takes over their keyboard and focus. On eamac, run a
-  PR's checks in a fresh `git clone` under `/tmp` and delete it afterwards. Leave its own
-  checkouts alone.
+  working machine, and automation there takes over their keyboard and focus. Native Windows
+  checks run on the maintainer's Windows 11 PC, `ssh home-window`, which never sleeps on AC. On
+  either box, run a PR's checks in a fresh `git clone` in a temporary directory (`/tmp` on eamac,
+  `%TEMP%` on Windows) and delete it afterwards. Leave their own checkouts alone.
 
 ## Maintainer workflow
 - A session that changes code, in any harness, stops at an open PR: only the maintainer's merge

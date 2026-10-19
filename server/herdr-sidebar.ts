@@ -43,7 +43,11 @@ function tokenRule(value: unknown): PaneTokenRule | null {
   return { [number[0]!]: condition, ...hide };
 }
 
-/** The `$name` tokens of one layout's rows, each once, in order; null when it is not a list of rows. */
+/**
+ * The `$name` tokens of one layout's rows, in order, a token named twice kept twice: herdr tests each
+ * place's rules on its own, so one hidden at its first place may still show at a later one
+ * (paneTokenValues draws it once, at the first place that shows it). Null when it is not a list of rows.
+ */
 function tokenSpecs(rows: unknown): PaneTokenSpec[] | null {
   if (!Array.isArray(rows) || !rows.every(Array.isArray)) return null;
   const specs: PaneTokenSpec[] = [];
@@ -53,7 +57,7 @@ function tokenSpecs(rows: unknown): PaneTokenSpec[] | null {
       const token = typeof entry === "string" ? entry : style?.["token"];
       if (typeof token !== "string" || !token.startsWith("$")) continue;
       const name = token.slice(1);
-      if (!PANE_TOKEN_NAME.test(name) || specs.some((spec) => spec.name === name)) continue;
+      if (!PANE_TOKEN_NAME.test(name)) continue;
       const rules = Array.isArray(style?.["rules"]) ? (style["rules"] as unknown[]).flatMap((rule) => tokenRule(rule) ?? []) : [];
       // only a rule that hides decides anything here: the web UI does not draw herdr's styles
       specs.push(rules.some((rule) => rule.hide) ? { name, rules } : { name });

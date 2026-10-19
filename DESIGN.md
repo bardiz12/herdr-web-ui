@@ -948,7 +948,8 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   are this server's herdr config, as herdr's sidebar is the client's, and apply to every PC's agents
   (server/herdr-sidebar.ts, told on the machine events). The values are text, never markup; a blank
   or missing token draws nothing; the row's tooltip, and a phone's ⋯ sheet under its place
-  (`.row-sheet-detail`, wrapped), say each whole. A PC that is away draws none, as it draws no
+  (`.row-sheet-detail`, wrapped, scrolling past a third of the screen so the actions stay in
+  reach, and following the row while open), say each whole. A PC that is away draws none, as it draws no
   state. A plugin's line for the agent (`display_agent`) leads the place, as before, where it says
   more than the mark and the title; it changes live like the tokens.
 - The Agents list is flat and every row names its own place. Pinned agents (pinned from a row's

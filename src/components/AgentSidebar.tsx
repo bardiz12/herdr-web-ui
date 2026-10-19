@@ -75,8 +75,12 @@ export interface AgentSidebarProps {
 /** the width under which the sidebar is a drawer (src/styles.css) */
 const DRAWER_QUERY = "(max-width: 768px)";
 interface AgentRow { machine: Machine; entry: SidebarAgent }
-/** The row whose menu is open, by its pin key: at its ⋯, or at the pointer for a right-click */
-interface PinMenu { key: string; anchor: HTMLElement; point?: { x: number; y: number }; previousFocus?: HTMLElement | null; title: string; place: string; tokens: string }
+/**
+ * The row whose menu is open, by its pin key: at its ⋯, or at the pointer for a right-click. What
+ * the menu says of the row is read from the row at each render, so a value that changes while it is
+ * open changes in it too.
+ */
+interface PinMenu { key: string; anchor: HTMLElement; point?: { x: number; y: number }; previousFocus?: HTMLElement | null }
 
 /**
  * All PCs' live agents form a second list; workspace and PC folds do not hide these rows.
@@ -128,9 +132,9 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
   // herdr names a PC only beside another: the rows' line does the same
   const machineName = (machine: Machine): string | null => machines.length > 1 ? machine.name : null;
 
-  const agentItem = ({ machine, entry }: AgentRow) => {
+  // what a row says of its agent, for the row and for its open menu
+  const describe = ({ machine, entry }: AgentRow) => {
     const { pane, workspace, tab, agent, agentLabel } = entry;
-    const selected = machine.id === selectedMachineId && pane.pane_id === selectedPaneId;
     const online = machine.state === "connected";
     const title = pane.label?.trim() || agent?.title?.trim() || pane.title?.trim() || displayPaneTitle(pane);
     const name = agent?.name?.trim() || null;
@@ -146,13 +150,21 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
     const markKind = kind && kind !== title.trim() && !contextParts.includes(kind) ? kind : null;
     // a PC that is away says nothing of its agents now, its plugins' words included
     const tokens = online ? paneTokenValues(rowTokens, entry.canonicalAgent, pane.tokens ?? agent?.tokens) : [];
+    return { online, title, name, mark, context, markKind, tokens };
+  };
+
+  const agentItem = (row: AgentRow) => {
+    const { machine, entry } = row;
+    const { pane, agent } = entry;
+    const selected = machine.id === selectedMachineId && pane.pane_id === selectedPaneId;
+    const { online, title, name, mark, context, markKind, tokens } = describe(row);
     // the row cuts a long value: the tooltip, and a phone's menu sheet, say each in full
     const tooltip = [...new Set([pane.pane_id, title, context, ...tokens, markKind, name, agent?.display_agent, pane.cwd, online ? null : stateWord(machine)].filter(Boolean))].join("\n");
     const pinKey = sidebarPinKey(machine.id, pane.pane_id);
     const menuOpen = menu?.key === pinKey;
     // one menu for the ⋯ and a right-click, which opens it at the pointer and leaves the focus where it was
     const toggleMenu = (anchor: HTMLElement, point?: { x: number; y: number }, previousFocus?: HTMLElement | null): void =>
-      setMenu(menuOpen ? null : { key: pinKey, anchor, point, previousFocus, title, place: context, tokens: tokens.join(" · ") });
+      setMenu(menuOpen ? null : { key: pinKey, anchor, point, previousFocus });
     return <li className={`agent-item${selected ? " is-selected" : ""}${online ? "" : " is-offline"}`} key={paneStorageId(machine.id, pane.pane_id)} data-machine={machine.id} data-pane={pane.pane_id} data-pin-key={pinKey}
       onMouseDownCapture={(event) => { if (event.button === 2 || (event.button === 0 && event.ctrlKey)) event.preventDefault(); }}
       onContextMenu={(event) => onRowContextMenu(event, toggleMenu)}>
@@ -180,6 +192,8 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
   // display: none), and its words land a frame after it (lib/useAnnouncedText.ts)
   const shownEmpty = useAnnouncedText(rows.length === 0 ? (loading ? t("Loading agents…") : t("No agents running")) : null);
   const menuPinned = menu !== null && pinned.includes(menu.key);
+  const menuRow = menu === null ? undefined : rows.find(({ machine, entry }) => sidebarPinKey(machine.id, entry.pane.pane_id) === menu.key);
+  const menuShown = menuRow === undefined ? null : describe(menuRow);
   const runPin = (state: PinMenu): void => {
     // where the menu hands the focus back (lib RowMenu): the ⋯ itself unless the right-click said otherwise
     const back = state.previousFocus === undefined ? state.anchor : state.previousFocus;
@@ -205,7 +219,7 @@ export function AgentSidebar({ machines, selectedMachineId, selectedPaneId, stat
         {split.rest.length > 0 && <ul className="agent-list">{split.rest.map(agentItem)}</ul>}
       </>}
     </div>
-    {menu && <RowMenu anchor={menu.anchor} point={menu.point} restoreFocusTo={menu.previousFocus} title={menu.title} subtitle={menu.place} detail={menu.tokens || undefined} onClose={closeMenu} items={[
+    {menu && menuShown && <RowMenu anchor={menu.anchor} point={menu.point} restoreFocusTo={menu.previousFocus} title={menuShown.title} subtitle={menuShown.context} detail={menuShown.tokens.join(" · ") || undefined} onClose={closeMenu} items={[
       menuPinned
         ? { id: "unpin", label: t("Unpin agent"), icon: PinOff, run: () => runPin(menu) }
         : { id: "pin", label: t("Pin agent"), icon: Pin, run: () => runPin(menu) },

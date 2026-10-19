@@ -38,6 +38,16 @@ describe("paneTokenValues", () => {
     expect(paneTokenValues(layout, null, { quota: "Wk 67%", load: "60" })).toEqual(["60"]);
     expect(paneTokenValues(layout, null, { quota: "unknown", load: "90%" })).toEqual(["unknown", "90%"]);
   });
+
+  test("a token the rows name twice is said once, at the first place whose rules leave it shown", () => {
+    const layout: AgentRowTokens = {
+      rows: [{ name: "quota", rules: [{ equals: "unknown", hide: true }] }, { name: "progress" }, { name: "quota" }],
+      by_agent: {},
+    };
+    // hidden at its first place, shown at its second, as herdr tests each place on its own
+    expect(paneTokenValues(layout, null, { quota: "unknown", progress: "40% 12m" })).toEqual(["40% 12m", "unknown"]);
+    expect(paneTokenValues(layout, null, { quota: "5h 95%", progress: "40% 12m" })).toEqual(["5h 95%", "40% 12m"]);
+  });
 });
 
 describe("paneTokenRuleMatches", () => {

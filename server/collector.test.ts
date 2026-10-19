@@ -779,6 +779,30 @@ describe("startStatusCollector recovery", () => {
     collector.stop();
   });
 
+  it("measures a display_agent event after a recovery against the line the resync showed", async () => {
+    // Given: a pane whose plugin line was A, and B while the subscription was lost
+    const herdr = fakeHerdr([{ ...paneOf("w1:p1", "idle"), display_agent: "A" } as HerdrPane]);
+    const { log, handlers } = recorder();
+    const collector = startStatusCollector(handlers, herdr.deps);
+    try {
+      await until(() => herdr.status() !== undefined, "the status subscription");
+      herdr.status()!.start();
+      await until(() => log.baselines >= 2, "the snapshot after the start");
+      const lost = herdr.status()!;
+      herdr.setPanes([{ ...paneOf("w1:p1", "idle"), display_agent: "B" } as HerdrPane]);
+      lost.drop();
+      await until(() => herdr.status() !== undefined && herdr.status() !== lost, "the reopened subscription");
+      herdr.status()!.start();
+      // the resync tells clients to read the panes again: they now show B
+      await until(() => log.structure === 1, "the resync's refresh");
+      // When: herdr says A again
+      herdr.setPanes([{ ...paneOf("w1:p1", "idle"), display_agent: "A" } as HerdrPane]);
+      herdr.status()!.emit({ event: "pane.agent_status_changed", data: { pane_id: "w1:p1", agent_status: "idle", agent: "claude", display_agent: "A" } });
+      // Then: that is a change from what clients show, and they read the panes again
+      await until(() => log.structure === 2, "the refresh for A");
+    } finally { collector.stop(); }
+  });
+
   it("still resyncs a pane that only came to the front while the recovery snapshot was on its way", async () => {
     const herdr = fakeHerdr([paneOf("w1:p1", "working"), paneOf("w1:p2", "working")]);
     const { log, handlers } = recorder();

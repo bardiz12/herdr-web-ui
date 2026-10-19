@@ -126,7 +126,34 @@ try {
             assert.equal(await detail.textContent(), `5h 95% · Wk 67% · ${LONG}`, "the sheet says every token whole");
             assert.ok(await detail.evaluate((element) => element.scrollWidth <= element.clientWidth + 1), "the sheet wraps instead of cutting");
             if (evidence && rows === "one") await page.locator(".row-sheet").screenshot({ path: join(evidence, "tokens-phone-sheet.png") });
+            // a value that changes while the sheet is open changes in it too (#1349)
+            await page.evaluate((pane) => (window as unknown as { __tokens: { report(paneId: string, tokens: object): void } }).__tokens.report(pane, { quota: "5h 40% \u00b7 Wk 70%" }), panes.api);
+            await page.waitForFunction(() => document.querySelector(".row-sheet .row-sheet-detail")?.textContent === "5h 40% \u00b7 Wk 70%");
             await page.locator(".row-sheet-cancel").click();
+            await page.locator(".row-sheet").waitFor({ state: "detached" });
+
+            // dozens of long values scroll inside the sheet's head: the title, the pin action and Cancel stay in reach (#1349)
+            const many = Object.fromEntries(Array.from({ length: 32 }, (_, i) => [`t${String(i).padStart(2, "0")}`, `value ${i} ${"lorem ipsum dolor sit amet ".repeat(11).trim()}`]));
+            await page.evaluate(([pane, tokens]) => (window as unknown as { __tokens: { report(paneId: string, tokens: object): void } }).__tokens.report(pane, tokens), [panes.api, many] as const);
+            await page.waitForFunction((pane) => document.querySelector(`.agent-list .agent-item[data-pane="${pane}"] .agent-tokens`)?.textContent?.startsWith("value 0 "), panes.api);
+            await row(page, panes.api).locator(".row-menu-toggle").click();
+            await detail.waitFor();
+            await page.evaluate(() => Promise.all(document.getAnimations().filter((animation) => animation.effect?.getComputedTiming().endTime !== Infinity).map((animation) => animation.finished)));
+            const reach = await page.evaluate(() => {
+              const hittable = (selector: string): boolean => {
+                const element = document.querySelector(selector);
+                if (!element) return false;
+                const box = element.getBoundingClientRect();
+                const hit = document.elementFromPoint(box.left + box.width / 2, box.top + box.height / 2);
+                return box.top >= 0 && box.bottom <= innerHeight && !!hit && element.contains(hit);
+              };
+              const scroller = document.querySelector(".row-sheet .row-sheet-detail")!;
+              return { title: hittable(".row-sheet .row-sheet-title"), pin: hittable(".row-sheet .row-sheet-item"), cancel: hittable(".row-sheet .row-sheet-cancel"), scrolls: scroller.scrollHeight > scroller.clientHeight };
+            });
+            assert.deepEqual(reach, { title: true, pin: true, cancel: true, scrolls: true }, "long tokens scroll in the sheet and leave its title and actions in reach");
+            if (evidence && rows === "one") await page.screenshot({ path: join(evidence, "tokens-phone-sheet-many.png") });
+            await page.locator(".row-sheet-cancel").click();
+            await page.evaluate(([pane, summary]) => (window as unknown as { __tokens: { report(paneId: string, tokens: object): void } }).__tokens.report(pane, { quota: "5h 95% \u00b7 Wk 67%", summary }), [panes.api, LONG] as const);
           }
 
           // herdr's rows told: only the tokens they name, in their order, a hide rule kept

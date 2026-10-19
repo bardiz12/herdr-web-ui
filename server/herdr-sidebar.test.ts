@@ -37,7 +37,7 @@ describe("herdrConfigPath", () => {
 });
 
 describe("agentRowTokens", () => {
-  test("takes the `$name` tokens of herdr's agent rows, each once, in order, and leaves the built-ins and styles", () => {
+  test("takes the `$name` tokens of herdr's agent rows, in order, each place of one named twice, and leaves the built-ins and styles", () => {
     // the rows herdr-projects adds, and the ones the Quota plugin's README suggests (#1209)
     expect(parse(`
 [ui.sidebar.agents]
@@ -46,7 +46,9 @@ rows = [["state_icon", "machine", "workspace", { token = "tab", rules = [{ equal
 [ui.sidebar.spaces]
 rows = [["state_icon", "workspace"], ["$workspace_only"]]
 `)).toEqual({ rows: [{ name: "summary" }, { name: "progress" }], by_agent: {} });
-    expect(parse(`[ui.sidebar.agents]\nrows = [["state_icon", "workspace"], ["agent", "$quota"], ["$quota"]]`)).toEqual({ rows: [{ name: "quota" }], by_agent: {} });
+    // herdr tests each place's rules on its own: a place that hides the token leaves the other one
+    expect(parse(`[ui.sidebar.agents]\nrows = [["state_icon", "workspace"], ["agent", { token = "$quota", rules = [{ equals = "unknown", hide = true }] }], ["$quota"]]`))
+      .toEqual({ rows: [{ name: "quota", rules: [{ equals: "unknown", hide: true }] }, { name: "quota" }], by_agent: {} });
   });
 
   test("keeps a token's rules only when one of them hides it, without their styles", () => {
