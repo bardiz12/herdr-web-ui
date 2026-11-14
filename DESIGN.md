@@ -4016,12 +4016,25 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   only the first letter drawn as a capital (`::first-letter`, the text is not rewritten); a pane
   that records no level draws no dot and no dash, only the name. On the
   fill the ring's track is `--border-strong`; a ring left bare on the card keeps `--border`.
-  No part carries a chevron: herdr owns the agent, so none of them opens a menu. It is display only: a `span` with no role, no
+  No part carries a chevron: herdr owns the agent, so none of them opens a menu. For every pane but an
+  OpenCode 2 session it is display only: a `span` with no role, no
   focus, no hover or pressed state, no pointer cursor and no chevron; the ring inside it is the
   one thing to press on desktop; mobile keeps the ring inert. The `title` of the model is the id as received, and the level's is its
   sentence; behind a name the id is also repeated as `.visually-hidden` text, since a touch
   cannot reach a title. A pane that names no model draws no pill: the mark and the ring stand
   alone, with a dim `Model —` and the level between them if the pane records only a level.
+- An OpenCode 2 session's pill is a control (`.composer-pill.is-switchable`): the whole of it is one
+  button (`.composer-session-button`, `aria-haspopup="dialog"`) that opens the session sheet, and
+  the agent's own name (`.composer-agent-mode`, as `/agents` writes it — `Build`, `Plan`) leads it,
+  since the mode is what decides the model's work. It keeps its box in every state the other pill
+  loses — a pane that names no model, a label that stepped out — because a control with no edge is
+  one nothing can press; the trailing space a ring or usage figure needs is the pill's, the padding
+  the button's. Hover steps the fill away from `--bg-hover` (already the resting fill) toward the
+  text, `aria-expanded` marks the open sheet, the focus ring is drawn inset (the pill clips its own
+  corners), and a disconnected pane's button is disabled. See Session sheet, below.
+- Nothing in it is typed into the pane: `/agents`, `/models` and the sheet all switch the session
+  through the OpenCode service it belongs to, which its TUI reads too, so the terminal's footer
+  follows the same write (Session sheet, below).
 - Before a session's first message no transcript names its model, so the pill takes it from the
   agent's own screen (`server/start-screen.ts`), as the Codex and Claude apps show the model in
   their composers before anything is sent: Claude Code's model under its title, and the live
@@ -4453,6 +4466,28 @@ Alert rows of the table above from the `--droplet-*` roles in `src/styles.css`.
   raises the keyboard: the user reads first, and a tap on the message box or the grid raises it.
   A desktop's picked pane takes typing at once.
 - With a mouse, Enter sends and Shift+Enter breaks by default; with **Enter sends** off, Mod+Enter sends. While Enter sends, Ctrl+Enter (not Cmd on a Mac, Claude Code's own key for this during a turn) sends now: the message is queued or held as Enter would, then that row goes by the same steer as its **Send now**, and a refused steer leaves the row with its reason; at rest it sends like Enter (#2596). On touch screens the same device setting is shown inverted as **Return inserts a new line**, with Send and hardware Mod+Enter explained below it, and is on until the device chooses, as in the ChatGPT and Claude phone apps: a soft keyboard's Return breaks the line and the Send button sends. The choice is kept in its own key (`ovis:enter-sends`); an older record's `enterSends: false` counts as chosen, its `true` (written by any save) does not. On a touch screen the text scrolls inside under a third of the visible height, so a long draft never pushes the row with Send under the keyboard. IME Enter is ignored. Stop sends Escape. While the agent works and a draft shows Send in Stop's place, Escape in the box is Stop; an open completion menu takes the first Escape, and its X in the top corner (`.composer-menu-close`, Close suggestions, sticky over the rows it scrolls; the first row leaves it room) does the same for a pointer or a phone, which has no Escape, keeping the text and the focus in the box. T3 Code's command menu closes on Escape alone. Working Send schedules a pending message; its Send now action submits that same message now.
+
+### Session sheet (`.session-settings`)
+
+- One dialog for both switches, because the agent's mode is what the model then does. The agent's
+  list comes first (a radiogroup of the service's primary, visible agents, each with the sentence
+  its own dialog writes under it), then the model list in a second radiogroup, grouped by provider
+  with the provider's own name as a sticky heading. The current row's variants (its reasoning
+  levels, `high`, `medium`, …) sit as pills under that row, not as a list of their own: an effort
+  belongs to a model, so it is offered once that model is the one running.
+- The model list is 240 entries of the user's own configuration, so it is searched, not browsed: a
+  `type="search"` field above it (focused on a fine pointer, left alone on a coarse one, where raising
+  a keyboard would cover the list it searches) filters on the name and the id, and the count beside
+  the heading says what is left. A search that matches nothing says so in the list's own place.
+- Choosing an agent or a model posts the switch to the pane's PC (`POST /api/pane/session-settings`),
+  which checks the id against the very lists it published before writing it: the service stores any
+  id it is handed, a made-up one included. The rows are disabled while a switch is in flight, and the
+  answer the switch comes back with is drawn at once, so the tick moves on the press rather than on
+  the chat's next read. A refused switch keeps its row and says so on the sheet's one error line; a
+  sheet that could not read the lists says that where they would be, and one still reading says
+  **Loading…**.
+- Escape, the scrim and a phone's back all close it; a sheet opened from `/agents` or `/models`
+  arrives the same way as one opened from the pill, and both write the same place.
 
 ### Comments on a reply (`.reply-comment*`, `.reply-comments*`)
 - Selecting text inside the words of one agent reply offers **Quote** first (lucide `Quote`, labelled)

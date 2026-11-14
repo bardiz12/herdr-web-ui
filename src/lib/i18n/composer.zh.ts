@@ -1,6 +1,7 @@
 /**
  * Simplified Chinese for the keys only the composer files use:
- * components/Composer.tsx (with SOURCE_LABEL), components/ComposerNotices.tsx,
+ * components/Composer.tsx (with SOURCE_LABEL), components/SessionSettings.tsx,
+ * components/ComposerNotices.tsx,
  * components/VoiceInput.tsx, components/SecretInput.tsx, components/TerminalInput.tsx,
  * components/PendingMessages.tsx, lib/compose.ts, components/PromptCard.tsx, lib/promptAnswer.ts,
  * and ../../../shared/card-text.ts (CARD_TEXT, the card text the bridge writes itself).
@@ -267,4 +268,11 @@ export const COMPOSER_ZH: Record<string, string> = {
   "Not sent: no agent is running in this pane. Your message stayed here.": "未发送：此窗格中没有运行的代理。消息仍保留在这里。",
   "1 comment": "1 条评论",
   "{count} comments": "{count} 条评论",
+  // the session's agent and model sheet (components/SessionSettings.tsx)
+  "Session settings": "会话设置",
+  "Session settings: {agent}, {model}": "会话设置: {agent}, {model}",
+  "Switch agent and model": "切换智能体和模型",
+  "Could not read this session's agents and models.": "无法读取此会话的智能体和模型。",
+  "Could not switch.": "无法切换。",
+  "No matching models": "没有匹配的模型",
 };

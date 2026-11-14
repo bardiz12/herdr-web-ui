@@ -60,6 +60,9 @@ import type {
   PaneZoomed,
   PaneFindRequest,
   PaneFindResponse,
+  PaneSessionSettingsRequest,
+  PaneSessionSettings,
+  PaneSessionChoices,
   PlanStep,
   ProjectFavicon,
   PromptAnswer,
@@ -1522,6 +1525,33 @@ export async function fetchPaneBtw(paneId: string, machineId = "local", signal?:
 export async function fetchPanePlan(paneId: string, machineId = "local"): Promise<{ steps: PlanStep[] | null; serverTime: string | null }> {
   const answer = await getJson<Partial<PanePlan>>(machinePath(machineId, `pane/plan?pane_id=${encodeURIComponent(paneId)}`));
   return { steps: answer.plan?.steps ?? null, serverTime: answer.server_time ?? null };
+}
+
+/**
+ * GET /api/pane/session-settings: what an OpenCode 2 pane's session runs now (its agent and model),
+ * and whether it can be switched at all. `supported: false` is an answer, not a failure: the pane is
+ * not such a session, and the chat draws no control for it.
+ */
+export async function fetchPaneSessionSettings(paneId: string, machineId = "local", signal?: AbortSignal): Promise<PaneSessionSettings> {
+  return await getJson<PaneSessionSettings>(machinePath(machineId, `pane/session-settings?pane_id=${encodeURIComponent(paneId)}`), { ...(signal ? { signal } : {}) });
+}
+
+/**
+ * GET /api/pane/session-settings?choices=1: the same, and the agents and models the session may switch
+ * to. Asked when the sheet opens: the service's model list is 240 entries of its own configuration.
+ */
+export async function fetchPaneSessionChoices(paneId: string, machineId = "local", signal?: AbortSignal): Promise<PaneSessionChoices> {
+  return await getJson<PaneSessionChoices>(machinePath(machineId, `pane/session-settings?pane_id=${encodeURIComponent(paneId)}&choices=1`), { ...(signal ? { signal } : {}) });
+}
+
+/**
+ * POST /api/pane/session-settings: switch the session's agent or its model through OpenCode's service,
+ * and read the settings and the choices back. The service writes the change where every client of it
+ * reads it, so the TUI's own footer follows without a keystroke.
+ */
+export async function switchPaneSession(change: PaneSessionSettingsRequest, machineId = "local"): Promise<PaneSessionChoices> {
+  const response = await sendJson(machinePath(machineId, "pane/session-settings"), "POST", change);
+  return (await response.json()) as PaneSessionChoices;
 }
 
 /** GET /api/pane/files: paths under the pane's cwd matching `query`, for @-mentions. */

@@ -1,6 +1,7 @@
 /**
  * Japanese for the keys only the composer files use:
- * components/Composer.tsx (with SOURCE_LABEL), components/ComposerNotices.tsx,
+ * components/Composer.tsx (with SOURCE_LABEL), components/SessionSettings.tsx,
+ * components/ComposerNotices.tsx,
  * components/VoiceInput.tsx, components/SecretInput.tsx, components/TerminalInput.tsx,
  * components/PendingMessages.tsx, lib/compose.ts, components/PromptCard.tsx, lib/promptAnswer.ts,
  * and ../../../shared/card-text.ts (CARD_TEXT, the card text the bridge writes itself).
@@ -267,4 +268,11 @@ export const COMPOSER_JA: Record<string, string> = {
   "Not sent: no agent is running in this pane. Your message stayed here.": "未送信: このペインではエージェントが動いていません。メッセージはここに残っています。",
   "1 comment": "コメント1件",
   "{count} comments": "コメント{count}件",
+  // the session's agent and model sheet (components/SessionSettings.tsx)
+  "Session settings": "セッション設定",
+  "Session settings: {agent}, {model}": "セッション設定: {agent}, {model}",
+  "Switch agent and model": "エージェントとモデルを切り替える",
+  "Could not read this session's agents and models.": "このセッションのエージェントとモデルを読み取れませんでした。",
+  "Could not switch.": "切り替えられませんでした。",
+  "No matching models": "一致するモデルがありません",
 };

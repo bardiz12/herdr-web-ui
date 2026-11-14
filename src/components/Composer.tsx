@@ -19,6 +19,8 @@ import "./Composer.css";
 import type { AgentStatus, ClientRole, ConversationMetadata, PlanSummary, SlashCommand } from "../../shared/protocol.ts";
 import { skillSyntax } from "../../shared/skill-syntax.ts";
 import { useMachineApi, useMachineId } from "../lib/machineContext.tsx";
+import { useSessionSettings } from "../lib/useSessionSettings.ts";
+import { SessionSettings } from "./SessionSettings.tsx";
 import { composerDraftKey, composerDrafts, underSendLock } from "../lib/composerDraft.ts";
 import { onQuoted } from "../lib/chatQuote.ts";
 import { commentsWait, holdsQuoteLine, messageWithComments, replyComments, replyCommentsKey, type ReplyComment } from "../lib/replyComments.ts";
@@ -255,6 +257,10 @@ export function Composer({
   const { settings, resolvedLanguage } = useSettings();
   const mobile = useMediaQuery("(max-width: 640px), (pointer: coarse)");
   const viewOnly = role === "observe";
+  // an OpenCode 2 session switches its agent and model through its own service (SessionSettings): the
+  // probe is small and the sheet reads the lists, but a pane another agent runs, a device that only
+  // watches and an empty chat ask nothing
+  const session = useSessionSettings(paneId, agent === "opencode" && !viewOnly && connected, metadata ?? null);
   // a touch screen's Return breaks the line until this device chooses otherwise; Send (or Mod+Enter) sends
   const enterSends = enterSendsOn(settings, useMediaQuery("(pointer: coarse)"));
   const usageEnabled = settings.showUsage && !mobile && machineId === "local" && planForPane(agent, metadata?.provider) !== null;
@@ -339,6 +345,14 @@ export function Composer({
   const trigger = useMemo(() => activeTrigger(text, caret, { skills: syntax.skillTriggers.includes("$"), namespaced: syntax.namespaced, atSkills: atSkills.length > 0 }), [atSkills, syntax, caret, text]);
   /** /resume retains the session picker instead of being sent to the terminal. */
   const terminalTyped = useMemo(() => typedTerminalCommand(commands, text), [commands, text]);
+  /**
+   * /agents and /models in an OpenCode 2 session open this chat's own sheet (SessionSettings) instead
+   * of the TUI's dialog: the service those dialogs write to is the one the sheet writes to, so the
+   * switch lands in the same place, and the chat can draw the result.
+   */
+  const sessionCommand = session.supported && (terminalTyped?.name === "agents" || terminalTyped?.name === "models")
+    ? terminalTyped.name
+    : null;
   const uploading = attachments.some((attachment) => attachment.state === "uploading");
   /** a finished upload whose path waits for the message to be shortened: Send waits with it */
   const roomless = attachments.find((attachment) => attachment.state === "no-room");
@@ -730,6 +744,9 @@ export function Composer({
       setMenuDismissed(true);
       if (typeof choice !== "string") {
         if (terminalCommand(choice) && choice.name === "resume") onOpenHistory?.();
+        // in an OpenCode 2 session these two open this chat's sheet, as /resume opens the picker: the
+        // service they write to is the one the sheet writes to
+        if (session.supported && (choice.name === "agents" || choice.name === "models")) session.openSheet();
         const name = choice.name;
         setSlashUsage((current) => {
           const next = { ...current, [name]: (current[name] ?? 0) + 1 };
@@ -742,7 +759,7 @@ export function Composer({
         });
       }
     },
-    [agent, onOpenHistory, setTextAndCaret, text],
+    [agent, onOpenHistory, session.openSheet, session.supported, setTextAndCaret, text],
   );
 
   const pumpUploads = useCallback(() => {
@@ -846,6 +863,9 @@ export function Composer({
     if (composingRef.current) return false;
     if (viewOnly || !connected || uploading || roomless || sending || (text.trim().length === 0 && carried.length === 0)) return false;
     if (terminalTyped?.name === "resume" && onOpenHistory) { setMenuDismissed(true); onOpenHistory(); return true; }
+    // /agents and /models in an OpenCode 2 session open this chat's sheet instead of the TUI's dialog:
+    // both write to the same service, and the sheet can show what the switch left behind
+    if (sessionCommand !== null) { setMenuDismissed(true); session.openSheet(); return true; }
     const message = carried.length > 0 ? messageWithComments(carried, text) : text;
     if (message.length > MAX_COMPOSER_CHARS) { setNote(t("Too long with the comments: remove a comment or shorten the message.")); return false; }
     const sentComments = carried;
@@ -909,7 +929,7 @@ export function Composer({
     return underSendLock(draftKey, () => {
       try { return claim(); } finally { release(); }
     });
-  }, [attachments, carried, commentsKey, connected, dictation.forget, draftKey, onClaim, onOpenHistory, onSend, roomless, sending, t, terminalTyped, text, uploading, viewOnly]);
+  }, [attachments, carried, commentsKey, connected, dictation.forget, draftKey, onClaim, onOpenHistory, onSend, roomless, sending, session.openSheet, sessionCommand, t, terminalTyped, text, uploading, viewOnly]);
   const sendRef = useRef(send);
   sendRef.current = send;
   const connectedRef = useRef(connected);
@@ -1187,6 +1207,12 @@ export function Composer({
   const hint = composerStatusHint({ uploading, connected, text, noRoom: roomless !== undefined });
   const model = metadata?.model ? modelLabel(metadata.model) : null;
   const modelShown = Boolean(metadata?.model || metadata?.reasoning_effort);
+  // the agent's name as its own dialog writes it (`Build`, `Plan`): the id when the service's list has not
+  // been read yet, which is what the pill shows after a switch made in the terminal
+  const sessionAgent = session.supported && session.agent !== null
+    ? session.choices?.agents.find((choice) => choice.id === session.agent)?.name ?? session.agent
+    : null;
+  const sessionModel = session.supported && session.model !== null ? modelLabel(session.model.id) : null;
   const usageDetail = usageWindows.map((window) => {
     const reset = formatResetIn(window.resets_at, Date.now());
     return `${windowLabel(window)} ${meterText(window, settings.usageCount)}${reset ? ` · ${t("Resets in {time}", { time: reset })}` : ""}`;
@@ -1350,6 +1376,9 @@ export function Composer({
                   const description = briefDescription(command.description);
                   const owner = command.origin === undefined ? null : ownerLabel(command.origin);
                   const Owner = command.origin === undefined ? null : ORIGIN_ICON[command.origin];
+                  // an OpenCode 2 session runs /agents and /models through this chat's own sheet, so the
+                  // Terminal badge beside them would promise a handoff that does not happen
+                  const inChat = session.supported && (command.name === "agents" || command.name === "models");
                   return (
                     <button
                       id={`${menuId}-${index}`}
@@ -1359,14 +1388,14 @@ export function Composer({
                       role="option"
                       aria-selected={index === selectedIndex}
                       data-origin={command.origin}
-                      data-terminal={terminalCommand(command) ? "" : undefined}
+                      data-terminal={terminalCommand(command) && !inChat ? "" : undefined}
                       title={command.description.trim() !== "" ? command.description : undefined}
                       onMouseDown={(event) => event.preventDefault()}
                       onClick={() => selectCompletion(command, trigger)}
                     >
                       {Owner !== null && <Owner aria-hidden="true" />}
                       <span className="menu-item-main">{prefix}{command.name}</span>
-                      {terminalCommand(command) && <span className="badge composer-menu-badge">{t("Terminal")}</span>}
+                      {terminalCommand(command) && !inChat && <span className="badge composer-menu-badge">{t("Terminal")}</span>}
                       {owner !== null && <span className="visually-hidden">{owner}</span>}
                       <span className="menu-item-hint">{withSource && owner === null ? `${t(SOURCE_LABEL[command.source])}${description ? " · " : ""}` : ""}{description}</span>
                     </button>
@@ -1577,25 +1606,50 @@ export function Composer({
             <span className="composer-agent-label visually-hidden">{agentLabel}</span>
             <span className="composer-status-separator visually-hidden" aria-hidden="true">·</span>
             <strong className="visually-hidden">{t(composerStatusWord(shownStatus))}</strong>
-            {/* the mark, the model, the level and the context ring as one quiet pill. It only shows: no role,
-                no focus, nothing to press but the ring inside it. A pane that names no model draws no pill
-                (.is-bare): the mark, a level if it has one, and the ring stand in the row as they are */}
-            <span className={`composer-pill${metadata?.model ? "" : " is-bare"}`}>
-              {agent && <AgentMark agent={agent} size={14} />}
-              {modelShown && <span className="composer-model-info" aria-label={t("Model and reasoning")}>
-                {/* a name only for an id modelLabel can name for certain; any other id is drawn as received, in the identifier face */}
-                <span className={`composer-model${model ? model.named ? "" : " is-id" : " is-none"}`} title={metadata?.model ?? t("Model not available")}>{model?.text ?? t("Model —")}</span>
-                {/* behind a name the id as received is still read; a touch cannot reach the title */}
-                {model?.named && <span className="composer-model-id visually-hidden">{metadata?.model}</span>}
-                {/* no level recorded: nothing is drawn for it, no dot and no dash; the sentence is still read */}
-                <span className={`composer-reasoning${metadata?.reasoning_effort ? "" : " visually-hidden"}`} title={metadata?.reasoning_effort ? t("Reasoning effort: {effort}", { effort: metadata.reasoning_effort }) : t("Reasoning effort not available")}>
-                  <span className="composer-reasoning-full visually-hidden">{t("Reasoning {effort}", { effort: metadata?.reasoning_effort ?? "—" })}</span>
-                  {metadata?.reasoning_effort && <>
+            {/* the mark, the model, the level and the context ring as one quiet pill. A pane that names no model
+                draws no pill (.is-bare): the mark, a level if it has one, and the ring stand in the row as they
+                are. An OpenCode 2 session's pill is a button (its sheet switches the agent and the model), and
+                the agent's own name leads it, since that is what the mode decides; every other pane's pill only
+                shows, as its ring does */}
+            <span className={`composer-pill${metadata?.model ? "" : " is-bare"}${session.supported ? " is-switchable" : ""}`}>
+              {session.supported ? <button
+                type="button"
+                className="composer-session-button"
+                aria-haspopup="dialog"
+                aria-expanded={session.open || undefined}
+                aria-label={t(sessionAgent !== null ? "Session settings: {agent}, {model}" : "Session settings", {
+                  agent: sessionAgent ?? "", model: sessionModel?.text ?? t("Model —"),
+                })}
+                title={t("Switch agent and model")}
+                disabled={!connected}
+                onClick={session.openSheet}
+              >
+                {agent && <AgentMark agent={agent} size={14} />}
+                {sessionAgent !== null && <span className="composer-agent-mode">{sessionAgent}</span>}
+                {modelShown && <span className="composer-model-info" aria-hidden="true">
+                  <span className={`composer-model${model ? model.named ? "" : " is-id" : " is-none"}`}>{model?.text ?? t("Model —")}</span>
+                  {metadata?.reasoning_effort && <span className="composer-reasoning">
                     <span className="composer-reasoning-dot" aria-hidden="true">·</span>
                     <span className="composer-reasoning-short" aria-hidden="true">{metadata.reasoning_effort}</span>
-                  </>}
-                </span>
-              </span>}
+                  </span>}
+                </span>}
+              </button> : <>
+                {agent && <AgentMark agent={agent} size={14} />}
+                {modelShown && <span className="composer-model-info" aria-label={t("Model and reasoning")}>
+                  {/* a name only for an id modelLabel can name for certain; any other id is drawn as received, in the identifier face */}
+                  <span className={`composer-model${model ? model.named ? "" : " is-id" : " is-none"}`} title={metadata?.model ?? t("Model not available")}>{model?.text ?? t("Model —")}</span>
+                  {/* behind a name the id as received is still read; a touch cannot reach the title */}
+                  {model?.named && <span className="composer-model-id visually-hidden">{metadata?.model}</span>}
+                  {/* no level recorded: nothing is drawn for it, no dot and no dash; the sentence is still read */}
+                  <span className={`composer-reasoning${metadata?.reasoning_effort ? "" : " visually-hidden"}`} title={metadata?.reasoning_effort ? t("Reasoning effort: {effort}", { effort: metadata.reasoning_effort }) : t("Reasoning effort not available")}>
+                    <span className="composer-reasoning-full visually-hidden">{t("Reasoning {effort}", { effort: metadata?.reasoning_effort ?? "—" })}</span>
+                    {metadata?.reasoning_effort && <>
+                      <span className="composer-reasoning-dot" aria-hidden="true">·</span>
+                      <span className="composer-reasoning-short" aria-hidden="true">{metadata.reasoning_effort}</span>
+                    </>}
+                  </span>
+                </span>}
+              </>}
               {metadata?.context && <ContextRing context={metadata.context} />}
               {usage !== undefined && isCurrent(usage) && usageLimit !== undefined && <span
                 className={`composer-usage${usageLimit.used_percent >= HIGH_PERCENT ? " is-high" : ""}${usage.recorded ? " is-recorded" : ""}`}
@@ -1667,6 +1721,13 @@ export function Composer({
       )}
       {/* above the whole composer: inside the surface it would cover the text being dictated */}
       {dictation.shown && <VoiceRecordingPill dictation={dictation} align="start" />}
+      {session.open && <SessionSettings
+        paneId={paneId}
+        choices={session.choices}
+        failed={session.failed}
+        onSwitch={session.switchTo}
+        onClose={session.closeSheet}
+      />}
     </div>
   );
 }

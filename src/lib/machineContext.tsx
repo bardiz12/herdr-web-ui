@@ -1,7 +1,7 @@
 import { createContext, useContext, useMemo } from "react";
 import * as api from "./api.ts";
 import type { HerdrIdentity } from "../../shared/machines.ts";
-import type { CreateWorktreeRequest, OpenWorktreeRequest, PaneDirection, PluginActionRequest, RemoveWorktreeRequest, SessionHistoryAgent, SessionResumeRequest, SplitPaneDirection } from "../../shared/protocol.ts";
+import type { CreateWorktreeRequest, OpenWorktreeRequest, PaneDirection, PaneSessionSettingsRequest, PluginActionRequest, RemoveWorktreeRequest, SessionHistoryAgent, SessionResumeRequest, SplitPaneDirection } from "../../shared/protocol.ts";
 import type { ZoomMode } from "./layoutMap.ts";
 import { ReorderCoordinator } from "./workspaceOrder.ts";
 export const MachineContext = createContext("local");
@@ -57,6 +57,9 @@ export function useMachineApi() {
     fetchPaneOmoActivity: (pane: string) => api.fetchPaneOmoActivity(pane, id),
     fetchPaneBackgroundAgent: (pane: string, agent: string) => api.fetchPaneBackgroundAgent(pane, agent, id),
     fetchPanePlan: (pane: string) => api.fetchPanePlan(pane, id),
+    fetchPaneSessionSettings: (pane: string, signal?: AbortSignal) => api.fetchPaneSessionSettings(pane, id, signal),
+    fetchPaneSessionChoices: (pane: string, signal?: AbortSignal) => api.fetchPaneSessionChoices(pane, id, signal),
+    switchPaneSession: (change: PaneSessionSettingsRequest) => api.switchPaneSession(change, id),
     fetchPaneArtifacts: (pane: string) => api.fetchPaneArtifacts(pane, id),
     fetchPaneBtw: (pane: string, signal?: AbortSignal) => api.fetchPaneBtw(pane, id, signal),
     closePane: (pane: string) => api.closePane(pane, id),

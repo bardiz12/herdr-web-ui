@@ -961,3 +961,115 @@ it("ends the request at once when the asker goes away during a read, reading no 
     read.mockRestore(); timers.restore();
   }
 });
+
+/** One pane whose OpenCode session runs in a service the test serves: its session and its own lists. */
+function sessionSettingsService(session = "ses_routeFixture") {
+  const calls: { method: string; path: string; body?: unknown }[] = [];
+  const service = Bun.serve({
+    port: 0,
+    hostname: "127.0.0.1",
+    async fetch(request) {
+      const url = new URL(request.url);
+      const body = request.method === "POST" ? await request.json() : undefined;
+      calls.push({ method: request.method, path: url.pathname, ...(body === undefined ? {} : { body }) });
+      if (url.pathname === "/api/info") return Response.json({ pid: process.pid, version: "2.0.32" });
+      if (url.pathname === `/api/session/${session}`) {
+        return Response.json({ data: { id: session, agent: "build", model: { id: "m1", providerID: "opencode" }, location: { directory: root } } });
+      }
+      if (url.pathname.startsWith("/api/session/")) return new Response(null, { status: 204 });
+      const directory = url.searchParams.get("location[directory]");
+      const data = url.pathname === "/api/agent" ? [{ id: "build", name: "Build", mode: "primary", hidden: false }, { id: "plan", name: "Plan", mode: "primary", hidden: false }]
+        : url.pathname === "/api/model" ? [{ id: "m1", providerID: "opencode", name: "Model One", variants: [{ id: "high" }] }]
+          : [{ id: "opencode", name: "OpenCode" }];
+      return Response.json({ location: { directory }, data });
+    },
+  });
+  return { service, calls, session };
+}
+
+it("answers a pane's session settings, and the switches only when they are asked for", async () => {
+  const { service, calls, session } = sessionSettingsService();
+  const state = mkdtempSync(join(root, "opencode-state-"));
+  panes["w:p1"] = { agent: "opencode", session, process: [{ pid: 2147483644, argv: ["opencode"], cwd: root }] };
+  writeFileSync(join(state, "service.json"), JSON.stringify({ url: service.url.origin, port: service.port, pid: process.pid, password: "fixture", version: "2.0.32" }));
+  try {
+    const probe = new URL("http://x/api/pane/session-settings?pane_id=w:p1");
+    const answer = (await handlePaneRequest(new Request(probe), probe, "/api/pane/session-settings", { openCodeStateDir: state }))!;
+    expect(answer.status).toBe(200);
+    expect(await answer.json()).toEqual({ supported: true, agent: "build", model: { id: "m1", providerID: "opencode" } });
+    // the probe asks the session alone: no model list is read to draw a chat
+    expect(calls.filter((call) => call.path === "/api/model")).toEqual([]);
+    const withChoices = new URL("http://x/api/pane/session-settings?pane_id=w:p1&choices=1");
+    const choices = (await handlePaneRequest(new Request(withChoices), withChoices, "/api/pane/session-settings", { openCodeStateDir: state }))!;
+    expect(await choices.json()).toMatchObject({
+      supported: true,
+      agents: [{ id: "build", name: "Build" }, { id: "plan", name: "Plan" }],
+      models: [{ id: "m1", providerID: "opencode", name: "Model One", variants: ["high"] }],
+    });
+  } finally {
+    service.stop(true);
+    delete panes["w:p1"];
+  }
+});
+
+it("offers nothing for a pane that is not an OpenCode 2 session", async () => {
+  panes["w:p2"] = { agent: "claude", process: [] };
+  try {
+    const url = new URL("http://x/api/pane/session-settings?pane_id=w:p2");
+    const response = (await handlePaneRequest(new Request(url), url, "/api/pane/session-settings", { openCodeStateDir: join(root, "nowhere") }))!;
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ supported: false, agent: null, model: null });
+  } finally { delete panes["w:p2"]; }
+});
+
+it("refuses a session switch with no pane, no switch, or a malformed model", async () => {
+  const post = (body: unknown) => {
+    const url = new URL("http://x/api/pane/session-settings");
+    return handlePaneRequest(new Request(url, { method: "POST", headers: { "content-type": "application/json", "sec-fetch-site": "same-origin" }, body: JSON.stringify(body) }), url, "/api/pane/session-settings", {});
+  };
+  expect((await post({ agent: "plan" }))!.status).toBe(400);
+  expect(await (await post({ pane_id: "w:p1" }))!.json()).toMatchObject({ error: { code: "missing_switch" } });
+  // both switches at once name neither
+  expect(await (await post({ pane_id: "w:p1", agent: "plan", model: { id: "m1", providerID: "opencode" } }))!.json()).toMatchObject({ error: { code: "missing_switch" } });
+  // a model without its provider is not a model
+  expect(await (await post({ pane_id: "w:p1", model: { id: "m1" } }))!.json()).toMatchObject({ error: { code: "invalid_model" } });
+  expect(await (await post({ pane_id: "w:p1", model: { id: "m1", providerID: "opencode", variant: 4 } }))!.json()).toMatchObject({ error: { code: "invalid_model" } });
+});
+
+it("checks a switch against the service's own lists before it is written", async () => {
+  const { service, calls, session } = sessionSettingsService();
+  const state = mkdtempSync(join(root, "opencode-state-"));
+  panes["w:p1"] = { agent: "opencode", session, process: [{ pid: 2147483644, argv: ["opencode"], cwd: root }] };
+  writeFileSync(join(state, "service.json"), JSON.stringify({ url: service.url.origin, port: service.port, pid: process.pid, password: "fixture", version: "2.0.32" }));
+  try {
+    const post = (body: unknown) => {
+      const url = new URL("http://x/api/pane/session-settings");
+      return handlePaneRequest(new Request(url, { method: "POST", headers: { "content-type": "application/json", "sec-fetch-site": "same-origin" }, body: JSON.stringify(body) }), url, "/api/pane/session-settings", { openCodeStateDir: state });
+    };
+    // the service stores any id, so a made-up agent is refused here
+    expect((await post({ pane_id: "w:p1", agent: "nope-nope" }))!.status).toBe(400);
+    expect(calls.filter((call) => call.method === "POST")).toEqual([]);
+    expect((await post({ pane_id: "w:p1", model: { id: "made-up", providerID: "opencode" } }))!.status).toBe(400);
+    // a variant the model does not take is refused too
+    expect((await post({ pane_id: "w:p1", model: { id: "m1", providerID: "opencode", variant: "low" } }))!.status).toBe(400);
+    expect(calls.filter((call) => call.method === "POST")).toEqual([]);
+    const switched = await post({ pane_id: "w:p1", agent: "plan" });
+    expect(switched!.status).toBe(200);
+    expect(calls.filter((call) => call.method === "POST")).toEqual([{ method: "POST", path: `/api/session/${session}/agent`, body: { agent: "plan" } }]);
+  } finally {
+    service.stop(true);
+    delete panes["w:p1"];
+  }
+});
+
+it("answers a switch on a pane whose session is not running as a conflict", async () => {
+  const state = join(root, "opencode-state-empty");
+  mkdirSync(state, { recursive: true });
+  panes["w:p1"] = { agent: "opencode", session: "ses_notHeld", process: [{ pid: 2147483644, argv: ["opencode"], cwd: root }] };
+  try {
+    const url = new URL("http://x/api/pane/session-settings");
+    const response = (await handlePaneRequest(new Request(url, { method: "POST", headers: { "content-type": "application/json", "sec-fetch-site": "same-origin" }, body: JSON.stringify({ pane_id: "w:p1", agent: "plan" }) }), url, "/api/pane/session-settings", { openCodeStateDir: state }))!;
+    expect(response.status).toBe(409);
+    expect(await response.json()).toMatchObject({ error: { code: "session_not_running" } });
+  } finally { delete panes["w:p1"]; }
+});

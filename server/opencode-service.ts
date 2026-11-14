@@ -259,6 +259,7 @@ export function openCodeFlagVersion(argv: unknown): string | null {
 
 export function forgetOpenCodeService(): void {
   verified = null;
+  forgetOpenCodeChoices();
 }
 
 /** Whether the service holds this session: a TUI bound to another service (or none) answers no. */
@@ -398,6 +399,130 @@ export async function replyOpenCodeForm(
 ): Promise<{ ok: boolean; status: number }> {
   try {
     const response = await openCodeRequest(config, `/api/session/${encodeURIComponent(sessionID)}/form/${encodeURIComponent(formID)}/reply`, signal, JSON.stringify({ answer: answers }));
+    const status = response?.status ?? 0;
+    return { ok: status === 200 || status === 204, status };
+  } catch {
+    return { ok: false, status: 0 };
+  }
+}
+
+/** One agent a session may run: the primary, visible ones are the switches its own dialog offers. */
+export interface OpenCodeAgentChoice { id: string; name: string; description?: string }
+
+/** One model a session may run, with the reasoning variants it takes. Never its settings: those hold a key. */
+export interface OpenCodeModelChoice { id: string; providerID: string; name: string; variants: string[] }
+
+export interface OpenCodeChoices {
+  agents: OpenCodeAgentChoice[];
+  models: OpenCodeModelChoice[];
+  /** the providers' own display names, keyed by id: the model list is grouped by them */
+  providers: { id: string; name: string }[];
+}
+
+/** What a session runs now: its agent and its model, as GET /api/session/{id} reports them. */
+export interface OpenCodeSelection { agent: string | null; model: { id: string; providerID: string; variant?: string } | null; directory: string | null }
+
+/**
+ * The choices are the service's own configuration read back, and 240 models weigh more than a switch
+ * should: a short hold keeps a sheet's open and its switch from asking twice. An edit to an agent or a
+ * provider's models lands within CHOICES_MS, and the sheet's next open reads them.
+ */
+const CHOICES_MS = 30_000;
+const choicesHeld = new Map<string, { until: number; value: OpenCodeChoices }>();
+
+export function forgetOpenCodeChoices(): void {
+  choicesHeld.clear();
+}
+
+const CHOICES_MAX = 8;
+
+/**
+ * GET /api/agent, /api/model and /api/provider for one directory. The agents are the switches the
+ * session's own dialog lists (primary, not hidden); every enabled model is offered with its variants.
+ * A reply whose location is not the directory asked for is no answer, as the catalog's are none.
+ */
+export async function listOpenCodeChoices(config: OpenCodeServiceConfig, directory: string, signal?: AbortSignal): Promise<OpenCodeChoices | null> {
+  const key = `${JSON.stringify(config)}\0${directory}`;
+  const held = choicesHeld.get(key);
+  if (held && held.until > Date.now()) return held.value;
+  const [agentBody, modelBody, providerBody] = await Promise.all([
+    getJson(config, `/api/agent?${locationQuery(directory)}`, signal),
+    getJson(config, `/api/model?${locationQuery(directory)}`, signal, 8 * 1024 * 1024),
+    getJson(config, `/api/provider?${locationQuery(directory)}`, signal),
+  ]);
+  const agentItems = listed(agentBody, directory);
+  const modelItems = listed(modelBody, directory);
+  const providerItems = listed(providerBody, directory);
+  if (!agentItems || !modelItems || !providerItems) return null;
+  const agents = agentItems.flatMap((item): OpenCodeAgentChoice[] => {
+    const row = object(item);
+    if (!row || typeof row.id !== "string" || !row.id || typeof row.name !== "string" || !row.name || row.mode !== "primary" || row.hidden === true) return [];
+    return [{ id: row.id, name: row.name, ...(typeof row.description === "string" && row.description.trim() ? { description: row.description } : {}) }];
+  });
+  const models = modelItems.flatMap((item): OpenCodeModelChoice[] => {
+    const row = object(item);
+    if (!row || typeof row.id !== "string" || !row.id || typeof row.providerID !== "string" || !row.providerID
+      || typeof row.name !== "string" || !row.name || row.enabled === false) return [];
+    // the variants' own settings (a reasoning effort) are the service's to apply: only their names matter here
+    const variants = Array.isArray(row.variants)
+      ? row.variants.flatMap((variant): string[] => typeof object(variant)?.id === "string" ? [object(variant)!.id as string] : [])
+      : [];
+    return [{ id: row.id, providerID: row.providerID, name: row.name, variants }];
+  });
+  const providers = providerItems.flatMap((item): { id: string; name: string }[] => {
+    const row = object(item);
+    return row && typeof row.id === "string" && row.id && typeof row.name === "string" && row.name ? [{ id: row.id, name: row.name }] : [];
+  });
+  if (agents.length === 0 || models.length === 0) return null;
+  const value: OpenCodeChoices = { agents, models, providers };
+  if (choicesHeld.size >= CHOICES_MAX) choicesHeld.delete(choicesHeld.keys().next().value!);
+  choicesHeld.set(key, { until: Date.now() + CHOICES_MS, value });
+  return value;
+}
+
+/** GET /api/session/{id}: the agent and model it runs now, and its folder, or null when the service does not hold it. */
+export async function readOpenCodeSelection(config: OpenCodeServiceConfig, sessionID: string, signal?: AbortSignal): Promise<OpenCodeSelection | null> {
+  const session = object(object(await getJson(config, `/api/session/${encodeURIComponent(sessionID)}`, signal))?.data);
+  if (!session || session.id !== sessionID) return null;
+  const model = object(session.model);
+  const directory = object(session.location)?.directory;
+  return {
+    agent: typeof session.agent === "string" && session.agent ? session.agent : null,
+    model: model && typeof model.id === "string" && model.id && typeof model.providerID === "string" && model.providerID
+      ? { id: model.id, providerID: model.providerID, ...(typeof model.variant === "string" && model.variant ? { variant: model.variant } : {}) }
+      : null,
+    directory: typeof directory === "string" && directory.startsWith("/") ? directory : null,
+  };
+}
+
+/**
+ * POST /api/session/{id}/agent: the agent the session's next turns run. The service accepts any id,
+ * a made-up one included, so the caller checks it against `agents` before this is asked.
+ */
+export async function switchOpenCodeAgent(config: OpenCodeServiceConfig, sessionID: string, agent: string, signal?: AbortSignal): Promise<{ ok: boolean; status: number }> {
+  try {
+    const response = await openCodeRequest(config, `/api/session/${encodeURIComponent(sessionID)}/agent`, signal, JSON.stringify({ agent }));
+    const status = response?.status ?? 0;
+    return { ok: status === 200 || status === 204, status };
+  } catch {
+    return { ok: false, status: 0 };
+  }
+}
+
+/**
+ * POST /api/session/{id}/model: the model and variant the session's next turns run. As with the agent,
+ * the id is the caller's to check: the service stores what it is given.
+ */
+export async function switchOpenCodeModel(
+  config: OpenCodeServiceConfig,
+  sessionID: string,
+  model: { id: string; providerID: string; variant?: string },
+  signal?: AbortSignal,
+): Promise<{ ok: boolean; status: number }> {
+  try {
+    const response = await openCodeRequest(config, `/api/session/${encodeURIComponent(sessionID)}/model`, signal, JSON.stringify({
+      model: { id: model.id, providerID: model.providerID, ...(model.variant ? { variant: model.variant } : {}) },
+    }));
     const status = response?.status ?? 0;
     return { ok: status === 200 || status === 204, status };
   } catch {

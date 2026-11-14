@@ -164,6 +164,7 @@ describe("demo transport", () => {
     "/api/pane/image": "pasting an image: the demo stores no files (listed when this guard was added)",
     "/api/pane/read": "the scrollback read behind a chat with no transcript: the demo answers /api/pane/conversation instead (listed when this guard was added)",
     "/api/pane/selection": "copying a selection across screens: not part of the demo (listed when this guard was added)",
+    "/api/pane/session-settings": "an OpenCode 2 session's agent and model: no demo pane runs OpenCode, and the composer asks nothing for the agents it does run (listed when this guard was added)",
     "/api/updates/check": "the demo's /api/updates says managed: false, so Settings offers no check",
     "/api/updates/install": "the demo's /api/updates says managed: false, so Settings offers no install",
     "/api/workspace/git/branches": "a repository's history, for API clients: no screen of the app asks for it yet",

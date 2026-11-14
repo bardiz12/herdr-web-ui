@@ -1,6 +1,7 @@
 /**
  * Korean for the keys only the composer files use:
- * components/Composer.tsx (with SOURCE_LABEL), components/ComposerNotices.tsx,
+ * components/Composer.tsx (with SOURCE_LABEL), components/SessionSettings.tsx,
+ * components/ComposerNotices.tsx,
  * components/VoiceInput.tsx, components/SecretInput.tsx, components/TerminalInput.tsx,
  * components/PendingMessages.tsx, lib/compose.ts, components/PromptCard.tsx, lib/promptAnswer.ts,
  * and ../../../shared/card-text.ts (CARD_TEXT, the card text the bridge writes itself).
@@ -267,4 +268,11 @@ export const COMPOSER_KO: Record<string, string> = {
   "Not sent: no agent is running in this pane. Your message stayed here.": "보내지 않음: 이 패널에서 실행 중인 에이전트가 없습니다. 메시지는 그대로 남아 있습니다.",
   "1 comment": "코멘트 1개",
   "{count} comments": "코멘트 {count}개",
+  // the session's agent and model sheet (components/SessionSettings.tsx)
+  "Session settings": "세션 설정",
+  "Session settings: {agent}, {model}": "세션 설정: {agent}, {model}",
+  "Switch agent and model": "에이전트와 모델 바꾸기",
+  "Could not read this session's agents and models.": "이 세션의 에이전트와 모델을 읽지 못했습니다.",
+  "Could not switch.": "바꾸지 못했습니다.",
+  "No matching models": "일치하는 모델 없음",
 };

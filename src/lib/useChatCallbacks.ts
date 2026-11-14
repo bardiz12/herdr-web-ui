@@ -113,6 +113,7 @@ export function useChatCallbacks(deps: ChatCallbacksDeps) {
     setChatMetadata((previous) => previous?.pane === pane && previous.value?.model === value?.model
       && previous.value?.reasoning_effort === value?.reasoning_effort
       && previous.value?.provider === value?.provider
+      && previous.value?.agent === value?.agent
       && previous.value?.context?.used === value?.context?.used
       && previous.value?.context?.window === value?.context?.window ? previous : { pane, value });
   }, []);

@@ -225,10 +225,12 @@
   display: contents;
 }
 
-/* the mark, the model, the level and the ring in one quiet pill, as tall as a control. It is a
-   surface, not a control: no border, no hover, no cursor, and the ring inside it is the only
-   thing to press. It shrinks before its neighbours do, so a name that does not fit is measured
-   clipped inside it (Composer.tsx) and the label steps out */
+/* the mark, the model, the level and the ring in one quiet pill, as tall as a control. For most
+   panes it is a surface, not a control: no border, no hover, no cursor, and the ring inside it is
+   the only thing to press. It shrinks before its neighbours do, so a name that does not fit is
+   measured clipped inside it (Composer.tsx) and the label steps out.
+   An OpenCode 2 session's pill is the control (.is-switchable): every part of it opens the sheet
+   that switches the agent and the model, so the whole of it answers to a press and to focus */
 .composer-pill {
   display: flex;
   flex: 0 1 auto;
@@ -251,6 +253,81 @@
 
 .composer-status[data-model="out"] .agent-mark {
   display: none;
+}
+
+/* An OpenCode 2 pane's pill is its session's control (.is-switchable): every part of it opens the
+   sheet that switches the agent and the model, so the row itself is the button and the whole pill
+   answers to a press. The pill keeps its box in every state — a label that stepped out, or a pane
+   that names no model, would leave a control with no edge to see or press — and the agent's own
+   name leads it, since the mode is what decides the model's work */
+.composer-pill.is-switchable,
+.composer-pill.is-switchable.is-bare,
+.composer-status[data-model="out"] .composer-pill.is-switchable {
+  display: flex;
+  padding: 0;
+}
+
+/* what stands after the control keeps the pill's trailing space; the control alone takes its
+   padding from its own two sides, so the pill's edges match the words they hold */
+.composer-pill.is-switchable:has(> .composer-context),
+.composer-pill.is-switchable:has(> .composer-usage) {
+  padding-right: var(--space-2);
+}
+
+.composer-session-button {
+  display: flex;
+  align-self: stretch;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  padding: 0 var(--space-3);
+  border: 0;
+  border-radius: inherit;
+  background: none;
+  color: inherit;
+  font-size: inherit;
+  text-align: left;
+  cursor: pointer;
+  touch-action: manipulation;
+  transition: background-color var(--dur-fast) var(--ease-out);
+}
+
+/* a step away from the pill's own fill, toward the text: the fill it rests on is already the
+   hover fill of a row, so the next step is the only one that reads as a control under a pointer */
+@media (hover: hover) {
+  .composer-session-button:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--bg-hover) 80%, var(--text-strong));
+  }
+}
+
+/* the ring is drawn inside the pill: the pill clips its own corners */
+.composer-session-button:focus-visible {
+  outline: var(--ring);
+  outline-offset: var(--ring-inset-offset);
+}
+
+/* the sheet is open: the pill says so while the scrim takes the press */
+.composer-session-button[aria-expanded="true"] {
+  background: var(--accent-tint);
+}
+
+/* not connected: it opens nothing, so it must not read as live */
+.composer-session-button:disabled {
+  opacity: 0.7;
+  cursor: default;
+}
+
+/* the agent's own name, as its own dialog writes it (Build, Plan): the pill's lead, in the text
+   color and the heavier weight, the model's name following in its own. It is a short word, not the
+   fitted label: the fit measures the model, so this gives way only with the whole pill */
+.composer-agent-mode {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  font-weight: var(--fw-semibold);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* stepped out: read, not drawn (the properties of .visually-hidden, set from the measured row) */

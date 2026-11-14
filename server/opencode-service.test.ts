@@ -5,17 +5,22 @@ import { join } from "node:path";
 import { createServer, type Socket } from "node:net";
 
 import {
+  forgetOpenCodeChoices,
   forgetOpenCodeService,
   listOpenCodeCatalog,
+  listOpenCodeChoices,
   listPendingQuestionForms,
   openCodeHasSession,
   openCodeService,
   opencodeAuthHeader,
   opencodeStateDir,
   parseOpenCodeEvent,
+  readOpenCodeSelection,
   readOpenCodeService,
   replyOpenCodeForm,
   subscribeOpenCodeEvents,
+  switchOpenCodeAgent,
+  switchOpenCodeModel,
   verifyOpenCodeService,
   type OpenCodeEvent,
   type OpenCodeServiceConfig,
@@ -278,6 +283,104 @@ describe("opencode-service", () => {
     await withService(() => Response.json({ location: { directory: "/elsewhere" }, data: [] }), async (config) => {
       expect(await listOpenCodeCatalog(config, "/work/proj")).toBeNull();
     });
+  });
+
+  it("offers the session's visible primary agents and its models, never a model's settings", async () => {
+    let requests: string[] = [];
+    const agents = [
+      { id: "build", name: "Build", mode: "primary", hidden: false },
+      { id: "plan", name: "Plan", mode: "primary", hidden: false, description: "Think only" },
+      // a subagent is not a switch the session's own dialog offers
+      { id: "explorer", name: "Explorer", mode: "subagent", hidden: false },
+      { id: "compaction", name: "Compaction", mode: "primary", hidden: true },
+    ];
+    const models = [
+      { id: "claude-opus-5-5", providerID: "opencode", name: "Opus 5.5", enabled: true, variants: [{ id: "high", settings: { reasoningEffort: "high" } }, { id: "none", settings: {} }], settings: { apiKey: "sk-secret", baseURL: "https://example.invalid" } },
+      { id: "gpt-5.6", providerID: "9router", name: "GPT-5.6", variants: [{ id: "high", settings: {} }] },
+      { id: "retired", providerID: "9router", name: "Retired", enabled: false, variants: [] },
+    ];
+    const providers = [{ id: "opencode", name: "OpenCode" }, { id: "9router", name: "9Router" }];
+    forgetOpenCodeChoices();
+    await withService((request) => {
+      const url = new URL(request.url);
+      requests.push(url.pathname);
+      const directory = url.searchParams.get("location[directory]");
+      const data = url.pathname === "/api/agent" ? agents : url.pathname === "/api/model" ? models : providers;
+      return Response.json({ location: { directory }, data });
+    }, async (config) => {
+      const choices = await listOpenCodeChoices(config, "/work/proj");
+      expect(choices).toEqual({
+        agents: [{ id: "build", name: "Build" }, { id: "plan", name: "Plan", description: "Think only" }],
+        models: [
+          { id: "claude-opus-5-5", providerID: "opencode", name: "Opus 5.5", variants: ["high", "none"] },
+          { id: "gpt-5.6", providerID: "9router", name: "GPT-5.6", variants: ["high"] },
+        ],
+        providers: [{ id: "opencode", name: "OpenCode" }, { id: "9router", name: "9Router" }],
+      });
+      // the projection carries variant ids only: a provider's key and endpoint stay in the service
+      const shipped = JSON.stringify(choices);
+      expect(shipped).not.toContain("sk-secret");
+      expect(shipped).not.toContain("example.invalid");
+      expect(shipped).not.toContain("settings");
+      // the answer is held for a moment: a sheet's open and its switch ask once
+      requests = [];
+      expect(await listOpenCodeChoices(config, "/work/proj")).toEqual(choices);
+      expect(requests).toEqual([]);
+      forgetOpenCodeChoices();
+      await listOpenCodeChoices(config, "/work/proj");
+      expect(requests.sort()).toEqual(["/api/agent", "/api/model", "/api/provider"]);
+    });
+  });
+
+  it("reads no choices from a location the service has not loaded", async () => {
+    forgetOpenCodeChoices();
+    await withService(() => Response.json({ location: { directory: "/elsewhere" }, data: [] }), async (config) => {
+      expect(await listOpenCodeChoices(config, "/work/proj")).toBeNull();
+    });
+    // an agent list with nothing to switch is no answer either
+    forgetOpenCodeChoices();
+    await withService((request) => {
+      const url = new URL(request.url);
+      return Response.json({ location: { directory: "/work/proj" }, data: url.pathname === "/api/model" ? [{ id: "m", providerID: "p", name: "M", variants: [] }] : [] });
+    }, async (config) => {
+      expect(await listOpenCodeChoices(config, "/work/proj")).toBeNull();
+    });
+  });
+
+  it("reads what the session runs now, or nothing when the service does not hold it", async () => {
+    await withService((request) => {
+      const id = decodeURIComponent(new URL(request.url).pathname.split("/").at(-1)!);
+      return id === "ses_held"
+        ? Response.json({ data: { id, agent: "plan", model: { id: "gpt-5.6", providerID: "9router", variant: "high" }, location: { directory: "/work/proj" } } })
+        : Response.json({ _tag: "SessionNotFoundError" }, { status: 404 });
+    }, async (config) => {
+      expect(await readOpenCodeSelection(config, "ses_held")).toEqual({
+        agent: "plan", model: { id: "gpt-5.6", providerID: "9router", variant: "high" }, directory: "/work/proj",
+      });
+      expect(await readOpenCodeSelection(config, "ses_other")).toBeNull();
+    });
+  });
+
+  it("switches the agent and the model on the session's own routes", async () => {
+    const sent: { path: string; body: unknown }[] = [];
+    await withService(async (request) => {
+      const url = new URL(request.url);
+      if (request.method === "POST") {
+        sent.push({ path: url.pathname, body: await request.json() });
+        return new Response(null, { status: 204 });
+      }
+      return Response.json({ data: {} });
+    }, async (config) => {
+      expect(await switchOpenCodeAgent(config, "ses_1", "plan")).toEqual({ ok: true, status: 204 });
+      expect(await switchOpenCodeModel(config, "ses_1", { id: "gpt-5.6", providerID: "9router", variant: "high" })).toEqual({ ok: true, status: 204 });
+      // no variant asked for: the body carries none, and the service stores its own default
+      expect(await switchOpenCodeModel(config, "ses_1", { id: "gpt-5.6", providerID: "9router" })).toEqual({ ok: true, status: 204 });
+    });
+    expect(sent).toEqual([
+      { path: "/api/session/ses_1/agent", body: { agent: "plan" } },
+      { path: "/api/session/ses_1/model", body: { model: { id: "gpt-5.6", providerID: "9router", variant: "high" } } },
+      { path: "/api/session/ses_1/model", body: { model: { id: "gpt-5.6", providerID: "9router" } } },
+    ]);
   });
 
   it("parses event blocks and ignores heartbeats and torn data", () => {

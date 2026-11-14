@@ -373,6 +373,21 @@ export type { DevicePairedEvent, DeviceRemovedEvent, PairingIntent, RelayPairing
  *         other pane or one without any)
  *  GET    /api/pane/plan?pane_id=       -> PanePlan (the plan the pane's Claude Code, Codex or OmO session
  *         keeps: its task list or checklist, read from the transcript; null when it keeps none)
+ *  GET    /api/pane/session-settings?pane_id=[&choices=1] -> PaneSessionSettings (what the pane's
+ *         OpenCode 2 session runs now, its agent and model). `choices=1` adds what it may switch to —
+ *         the primary, visible agents and every enabled model with its variants, the 30 s hold the
+ *         service's own lists get — as PaneSessionChoices; without it the answer weighs a few bytes,
+ *         which is what a chat asks on every pane before it draws a control. `supported` false for a
+ *         pane that is not an OpenCode 2 session on a verified service with this session: there is
+ *         nothing to switch and no error to show. 403 read_only for a watching device, as the command
+ *         rows are: the sheet is a drive feature
+ *  POST   /api/pane/session-settings { pane_id, agent } OR { pane_id, model: { id, providerID, variant? } }
+ *         -> PaneSessionChoices (the switch OpenCode 2's own dialog makes, through its service: the
+ *         event it writes reaches every TUI and this answer alike, so a client elsewhere redraws its
+ *         footer without a keystroke. One of `agent` and `model` is required. The service stores any
+ *         id it is given, so both are checked here against the choices it lists: 400 invalid_agent or
+ *         invalid_model otherwise. 409 session_not_running when the session's service stopped or the
+ *         pane no longer holds it; 502 switch_failed when the service refused. 403 read_only)
  *  GET    /api/pane/files?pane_id=&q=&limit=  -> { files: string[] } (paths relative to the pane
  *         cwd matching q, for @-mentions; git ls-files when the cwd is a repo, bounded walk otherwise)
  *  GET    /api/pane/docs?pane_id=       -> PaneDocuments (the Markdown files under the pane's folder,
@@ -768,6 +783,11 @@ export interface ConversationMetadata {
    * `openai-codex`): set by a model change and by each answer, absent when none is named.
    */
   provider?: string;
+  /**
+   * The agent (mode) the session runs now, as OpenCode 2 names it in its own store (`build`,
+   * `plan`, …): absent for every other agent, which has no such choice to show.
+   */
+  agent?: string | null;
 }
 
 export type { OmoTask, OmoRunNode, OmoRun, OmoActivity, PaneBackgroundAgentDetail } from "./tasks.ts";
@@ -806,6 +826,48 @@ export interface OmpBtwHistory {
   topics: OmpBtwTopic[];
   more: boolean;
 }
+
+/** One agent an OpenCode 2 session may run, as its own dialog lists it: primary and visible. */
+export interface PaneAgentChoice {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+/** One model an OpenCode 2 session may run, with the reasoning variants it takes (`high`, `medium`, …). */
+export interface PaneModelChoice {
+  id: string;
+  providerID: string;
+  name: string;
+  variants: string[];
+}
+
+/**
+ * GET /api/pane/session-settings: what the pane's OpenCode 2 session runs now, and whether it can be
+ * switched at all. `supported` false is not an error — a pane that is not such a session has no
+ * switch to offer — and the chat draws no control for it.
+ */
+export interface PaneSessionSettings {
+  supported: boolean;
+  agent: string | null;
+  model: { id: string; providerID: string; variant?: string } | null;
+}
+
+/**
+ * The same, with the switches to offer (GET with `choices=1`, and what a POST answers): the primary,
+ * visible agents and every enabled model with the reasoning variants it takes.
+ */
+export interface PaneSessionChoices extends PaneSessionSettings {
+  agents: PaneAgentChoice[];
+  models: PaneModelChoice[];
+  /** the providers' own display names, keyed by id, for grouping the models */
+  providers: { id: string; name: string }[];
+}
+
+/** POST /api/pane/session-settings: exactly one of the two switches. */
+export type PaneSessionSettingsRequest =
+  | { pane_id: string; agent: string }
+  | { pane_id: string; model: { id: string; providerID: string; variant?: string } };
 
 /** How far a pane's plan has got, for the sidebar: `current` names the step in progress. */
 export interface PlanSummary {

@@ -356,6 +356,30 @@ describe("a page of an OpenCode session", () => {
     expect(page(opencodeConversation(s.path, s.session)).metadata).toEqual({ model: "glm-5.3", reasoning_effort: "high" });
   });
 
+  it("names the agent the session runs, from its switch rows or the column a newer store keeps", () => {
+    const s = store();
+    s.prompt("hello");
+    s.answer("hi");
+    // this store predates the column and records no switch: no agent is named, and the reader that does
+    // not show one has nothing to read
+    expect(page(opencodeConversation(s.path, s.session)).metadata).toEqual({ model: "deepseek-v4.1-flash", reasoning_effort: null, context: { used: 116, window: null } });
+    s.add("agent-switched", { time: { created: T0 }, agent: "plan" });
+    expect(page(opencodeConversation(s.path, s.session)).metadata.agent).toBe("plan");
+    s.add("agent-switched", { time: { created: T0 }, agent: "build" });
+    // the newest switch before the page's end is what the footer shows
+    expect(page(opencodeConversation(s.path, s.session)).metadata.agent).toBe("build");
+    // a store that keeps the column (2.0.32) names the agent a session was opened on, with no row at all
+    s.db.exec("ALTER TABLE session_v2 ADD COLUMN agent text");
+    s.db.query("UPDATE session_v2 SET agent = 'nakula' WHERE id = ?").run(s.session);
+    forgetOpencodeState();
+    expect(page(opencodeConversation(s.path, s.session)).metadata.agent).toBe("build");
+    const fresh = store("ses_columnAgent");
+    fresh.db.exec("ALTER TABLE session_v2 ADD COLUMN agent text");
+    fresh.db.query("UPDATE session_v2 SET agent = 'nakula' WHERE id = ?").run("ses_columnAgent");
+    fresh.prompt("hello");
+    expect(page(opencodeConversation(fresh.path, "ses_columnAgent")).metadata.agent).toBe("nakula");
+  });
+
   it("pages a long session by prompt, and the pages meet exactly", () => {
     const s = store();
     for (let n = 0; n < 120; n++) { s.prompt(`p${n}`); s.answer(`a${n}`); s.idle(); }

@@ -267,6 +267,9 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
   // the paths under a pane's folder that match a query are a directory listing too; they feed the
   // composer's @-mention picker, a drive feature (#2244); so are its Markdown files, which Files' Documents lists
   const paneFiles = /^\/api\/(?:machines\/[^/]+\/)?pane\/(?:files|docs)$/.test(pathname);
+  // a session's agents and models are the user's configuration read back (names, and which providers
+  // it holds), and the sheet that lists them is a drive feature as the command rows are
+  const sessionSettings = /^\/api\/(?:machines\/[^/]+\/)?pane\/session-settings$/.test(pathname);
   // where a plugin action's run stands carries what its command printed when it failed, asked for by a
   // log id: only the device that started the run (a POST, which a watching device cannot send) asks it
   const pluginRun = /^\/api\/(?:machines\/[^/]+\/)?plugin\/action$/.test(pathname);
@@ -275,7 +278,7 @@ export async function handleRequest(request: Request, ctx: ServerContext): Promi
   const worktreeList = /^\/api\/(?:machines\/[^/]+\/)?worktree\/(?:list|inventory)$/.test(pathname);
   // the digits of a waiting comparison are what approving it takes (docs/account.md, "Who may admit a device")
   const pairingDigits = pathname === "/api/relay/pairings";
-  if (readOnly && (fileRead || directoryListing || repositoryDiff || pullRequest || sessionHistory || commandRows || paneFiles || pluginRun || worktreeList || pairingDigits || mutating && !ownPreferences)) {
+  if (readOnly && (fileRead || directoryListing || repositoryDiff || pullRequest || sessionHistory || commandRows || paneFiles || sessionSettings || pluginRun || worktreeList || pairingDigits || mutating && !ownPreferences)) {
     setRequestRoute("watch-refusal");
     return jsonResponse({ error: { code: "read_only", message: "this device can only watch" } }, 403);
   }

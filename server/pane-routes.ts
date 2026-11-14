@@ -16,6 +16,7 @@ import { PANE_SUMMARY_DEADLINE_MS, PANE_SUMMARY_KEEP_MS, PANE_SUMMARY_MAX_IDS, P
 import { searchConversationPages } from "./conversation-search.ts";
 import { OPENCODE_TOOL_REF } from "./opencode.ts";
 import { openCodeFlagVersion, openCodeInstalledVersion } from "./opencode-service.ts";
+import { readPaneSessionChoices, readPaneSessionSettings, switchPaneSession } from "./opencode-settings.ts";
 import { DevinHistoryChanged } from "./devin.ts";
 import { agentRename, HerdrError, integrationList, layoutSetSplitRatio, paneClear, paneClose, paneFind, paneFocus, paneGet, paneMoveBeside, paneRead, paneRename, paneResize, paneScroll, paneScrollInfo, paneSelectionRead, paneSendKeys, paneSendText, paneSplit, paneSwap, paneSwapWith, paneZoom } from "./herdr/client.ts";
 import { paneContext, resolveAgent, versionSourceOf } from "./pane-context.ts";
@@ -202,6 +203,52 @@ export async function handlePaneRequest(request: Request, url: URL, pathname: st
     if (!paneId) return badRequest("missing_pane_id", "pane_id query parameter is required");
     try {
       return jsonResponse(await paneDocuments((await paneContext(paneId)).cwd, request.signal));
+    } catch (error) {
+      return errorResponse(error);
+    }
+  }
+
+  if (pathname === "/api/pane/session-settings") {
+    setRequestRoute(pathname);
+    if (request.method === "GET") {
+      const paneId = url.searchParams.get("pane_id");
+      if (!paneId) return badRequest("missing_pane_id", "pane_id query parameter is required");
+      // `choices=1` adds the switches: they are the service's own lists, which a chat asks for when its sheet opens
+      const choices = url.searchParams.get("choices") === "1";
+      try {
+        const { pane } = await paneContext(paneId);
+        return jsonResponse(choices
+          ? await readPaneSessionChoices(pane, options.openCodeStateDir, request.signal)
+          : await readPaneSessionSettings(pane, options.openCodeStateDir, request.signal));
+      } catch (error) {
+        return errorResponse(error);
+      }
+    }
+    if (request.method !== "POST") return badRequest("method_not_allowed", "use GET or POST");
+    const payload = await readJsonObject<{ pane_id?: unknown; agent?: unknown; model?: unknown }>(request);
+    if (payload instanceof Response) return payload;
+    if (typeof payload.pane_id !== "string" || payload.pane_id.length === 0) return badRequest("missing_pane_id", "pane_id is required");
+    const agent = typeof payload.agent === "string" && payload.agent.length > 0 ? payload.agent : null;
+    const model = isJsonObject(payload.model) ? payload.model : null;
+    if ((agent === null) === (model === null)) return badRequest("missing_switch", "one of agent and model is required");
+    // the shape is checked here, the ids against the service's own lists (opencode-settings.ts): it stores any id
+    const wanted = model === null ? null : {
+      id: typeof model.id === "string" ? model.id : "",
+      providerID: typeof model.providerID === "string" ? model.providerID : "",
+      ...(model.variant === undefined ? {} : { variant: typeof model.variant === "string" ? model.variant : "" }),
+    };
+    if (model !== null && (!wanted!.id || !wanted!.providerID || wanted!.variant === "")) {
+      return badRequest("invalid_model", "model needs id and providerID, and variant when it has one");
+    }
+    try {
+      const { pane } = await paneContext(payload.pane_id);
+      const switched = await switchPaneSession(pane, agent !== null ? { agent } : { model: wanted! }, options.openCodeStateDir, request.signal);
+      if (switched.ok) return jsonResponse(switched.settings);
+      return switched.code === "switch_failed"
+        ? jsonResponse({ error: { code: switched.code, message: switched.message } }, 502)
+        : switched.code === "session_not_running"
+          ? conflictResponse(switched.code, switched.message)
+          : badRequest(switched.code, switched.message);
     } catch (error) {
       return errorResponse(error);
     }

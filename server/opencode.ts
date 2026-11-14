@@ -299,6 +299,7 @@ export function forgetOpencodeState(): void {
   newestRecords.clear();
   answers.clear();
   settings.clear();
+  agents.clear();
 }
 
 /** What every cache here is keyed by: a pane's chat is remembered against it (conversation.ts `rememberPaneRead`). */
@@ -416,6 +417,9 @@ function sessionMetadata(db: Database, key: string, sessionId: string, end: numb
     // `default` is the model's own reasoning, not a level anyone chose
     reasoning_effort: setting?.variant !== null && setting?.variant !== undefined && setting.variant !== "default" ? setting.variant : null,
   };
+  // absent, not null, for a session that names none: a reader that does not show an agent has nothing to
+  const agent = sessionAgent(db, sessionId, end);
+  if (agent !== null) metadata.agent = agent;
   if (usage !== null) {
     const cache = record(usage.cache);
     const used = count(usage.input) + count(usage.output) + count(usage.reasoning) + count(cache.read) + count(cache.write);
@@ -426,6 +430,34 @@ function sessionMetadata(db: Database, key: string, sessionId: string, end: numb
 
 function parseData(data: string): Row {
   try { return record(JSON.parse(data)); } catch { return {}; }
+}
+
+/** What an `agent-switched` row says, kept while its `time_updated` holds: these rows are small and few. */
+const agents = new Map<string, { updated: number; agent: string | null }>();
+
+/**
+ * The agent (OpenCode's own mode: `build`, `plan`, …) the session runs at `end`. The newest
+ * `agent-switched` row before the chat's extent is what its footer shows, a staged `/undo` included;
+ * one switched before its first row (a session opened on `plan`) names it in `session_v2.agent`
+ * alone, so that column stands in when no row does.
+ */
+function sessionAgent(db: Database, sessionId: string, end: number): string | null {
+  const row = db.query<{ id: string; updated: number }, [string, number]>(
+    "SELECT id, time_updated AS updated FROM session_message WHERE session_id = ? AND type = 'agent-switched' AND seq < ? ORDER BY seq DESC LIMIT 1",
+  ).get(sessionId, end);
+  if (row !== null) {
+    let known = agents.get(row.id);
+    if (known?.updated !== row.updated) {
+      const found = db.query<{ data: string }, [string, string]>("SELECT data FROM session_message WHERE id = ? AND session_id = ?").get(row.id, sessionId);
+      known = { updated: row.updated, agent: text(parseData(found?.data ?? "").agent) };
+      remember(agents, row.id, known, 64);
+    }
+    return known.agent;
+  }
+  // a store from before the column (OpenCode 2.0.24) has none: no agent to name, not an error
+  try {
+    return text(db.query<{ agent: string | null }, [string]>("SELECT agent FROM session_v2 WHERE id = ?").get(sessionId)?.agent);
+  } catch { return null; }
 }
 
 /**
